@@ -8,6 +8,7 @@ from typing import Optional
 
 import pandas as pd
 import jwt
+from openpyxl import load_workbook
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
@@ -802,14 +803,32 @@ async def import_statement(
     ctx: dict = Depends(require_role([Role.admin, Role.finance, Role.ops])),
 ):
     content = await file.read()
+    filename = (file.filename or "").lower()
+    if not (filename.endswith(".csv") or filename.endswith(".xlsx")):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "仅支持 CSV / XLSX 文件"})
     tmp = f"./tmp_{dt.datetime.now().timestamp()}.xlsx"
     with open(tmp, "wb") as f:
         f.write(content)
     try:
-        if file.filename and file.filename.lower().endswith(".csv"):
+        if filename.endswith(".csv"):
             df = pd.read_csv(tmp)
         else:
-            df = pd.read_excel(tmp)
+            wb = load_workbook(tmp, data_only=True, read_only=True)
+            ws = wb[wb.sheetnames[0]]
+            rows_iter = ws.iter_rows(values_only=True)
+            headers = [str(x).strip() if x is not None else "" for x in next(rows_iter, [])]
+            rows_data = []
+            for row in rows_iter:
+                if row is None:
+                    continue
+                values = list(row)
+                if all(v is None or str(v).strip() == "" for v in values):
+                    continue
+                rows_data.append({headers[i] if i < len(headers) else f"col_{i}": values[i] for i in range(len(values))})
+            df = pd.DataFrame(rows_data)
+            wb.close()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "仅支持 CSV / XLSX 文件"}) from e
     finally:
         os.remove(tmp)
     required = {"channel_name", "game_name", "gross_amount"}

@@ -397,7 +397,7 @@ export default function ImportPage() {
     message.success("草稿已保存");
   };
 
-  const downloadTemplate = () => {
+  const downloadTemplateCsv = () => {
     const csv = "channel_name,game_name,gross_amount\n渠道A,游戏X,100000\n";
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
@@ -406,6 +406,13 @@ export default function ImportPage() {
     a.download = "import_template.csv";
     a.click();
     URL.revokeObjectURL(url);
+  };
+  const downloadTemplateXlsx = () => {
+    const rows = [{ channel_name: "渠道A", game_name: "游戏X", gross_amount: 100000 }];
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Template");
+    XLSX.writeFile(wb, "import_template.xlsx");
   };
 
   const exportExceptions = () => {
@@ -538,7 +545,9 @@ export default function ImportPage() {
               children: (
                 <Space direction="vertical" size={16} style={{ width: "100%" }}>
                   <Space wrap>
+                    <Tag color="blue">支持 CSV / XLSX 模板导入</Tag>
                     <Upload
+                      accept=".csv,.xlsx"
                       beforeUpload={(file) => {
                         setFileList([file]);
                         parseFile(file);
@@ -555,7 +564,8 @@ export default function ImportPage() {
                     <Button type="primary" onClick={upload}>
                       上传并导入
                     </Button>
-                    <Button onClick={downloadTemplate}>模板下载</Button>
+                    <Button onClick={downloadTemplateCsv}>下载 CSV 模板</Button>
+                    <Button onClick={downloadTemplateXlsx}>下载 XLSX 模板</Button>
                     <Button onClick={exportExceptions}>异常导出</Button>
                     <Button onClick={() => router.push("/recon-tasks")}>去核对任务页</Button>
                   </Space>
