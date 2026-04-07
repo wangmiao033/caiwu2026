@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Button,
@@ -15,11 +15,13 @@ import {
   Space,
   Spin,
   Statistic,
+  Switch,
   Table,
   Tabs,
   Tag,
   Timeline,
   Tooltip,
+  Typography,
   Upload,
   message,
 } from "antd";
@@ -92,6 +94,12 @@ type ImportHistoryFilter = {
   status: string;
 };
 
+type UnmatchedVariantRow = {
+  game_name: string;
+  count: number;
+  period: string;
+};
+
 type ExtractRow = {
   __rowNum__: number;
   game_name: string;
@@ -150,6 +158,11 @@ export default function ImportPage() {
   const [uploading, setUploading] = useState(false);
   const [showVariantColumns, setShowVariantColumns] = useState(false);
   const [variantInfoMap, setVariantInfoMap] = useState<Record<string, { project_name: string; variant_name: string }>>({});
+  const [unmatchedVariants, setUnmatchedVariants] = useState<UnmatchedVariantRow[]>([]);
+  const [unmatchedLoading, setUnmatchedLoading] = useState(false);
+  const [quickVariantOpen, setQuickVariantOpen] = useState(false);
+  const [quickProjects, setQuickProjects] = useState<Array<{ id: number; name: string; status: string }>>([]);
+  const [quickForm] = Form.useForm();
 
   const [extractFile, setExtractFile] = useState<File | null>(null);
   const [extractSheets, setExtractSheets] = useState<string[]>([]);
@@ -163,6 +176,27 @@ export default function ImportPage() {
   const [extractRows, setExtractRows] = useState<ExtractRow[]>([]);
   const [onlyShowExtractErrors, setOnlyShowExtractErrors] = useState(false);
 
+  const refreshVariantInfoMap = useCallback(async () => {
+    try {
+      const [projectsData, variantsData] = await Promise.all([
+        apiRequest<Array<{ id: number; name: string }>>("/projects"),
+        apiRequest<Array<{ project_id: number; raw_game_name: string; variant_name: string }>>("/game-variants"),
+      ]);
+      const projectNameMap = new Map<number, string>();
+      projectsData.forEach((p) => projectNameMap.set(p.id, p.name));
+      const map: Record<string, { project_name: string; variant_name: string }> = {};
+      variantsData.forEach((v) => {
+        map[v.raw_game_name] = {
+          project_name: projectNameMap.get(v.project_id) || "",
+          variant_name: v.variant_name || "",
+        };
+      });
+      setVariantInfoMap(map);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
   useEffect(() => {
     apiRequest<OptionItem[]>("/channels")
       .then(setChannels)
@@ -173,20 +207,7 @@ export default function ImportPage() {
     apiRequest<{ channel: string; game: string }[]>("/channel-game-map")
       .then((data) => setMaps(data.map((x, idx) => ({ id: idx + 1, channel: x.channel, game: x.game }))))
       .catch(() => {});
-    Promise.all([apiRequest<Array<{ id: number; name: string }>>("/projects"), apiRequest<Array<{ project_id: number; raw_game_name: string; variant_name: string }>>("/game-variants")])
-      .then(([projectsData, variantsData]) => {
-        const projectNameMap = new Map<number, string>();
-        projectsData.forEach((p) => projectNameMap.set(p.id, p.name));
-        const map: Record<string, { project_name: string; variant_name: string }> = {};
-        variantsData.forEach((v) => {
-          map[v.raw_game_name] = {
-            project_name: projectNameMap.get(v.project_id) || "",
-            variant_name: v.variant_name || "",
-          };
-        });
-        setVariantInfoMap(map);
-      })
-      .catch(() => {});
+    refreshVariantInfoMap();
     loadHistory(1);
     const manualDraft = localStorage.getItem("manual_import_draft");
     if (manualDraft) {
@@ -207,7 +228,7 @@ export default function ImportPage() {
         if (typeof draft.titleRow === "number") setTitleRow(draft.titleRow);
       } catch {}
     }
-  }, []);
+  }, [refreshVariantInfoMap]);
 
   const parseFile = async (f: File) => {
     const buf = await f.arrayBuffer();
@@ -338,6 +359,76 @@ export default function ImportPage() {
       message.error((e as Error).message);
     }
   };
+
+  const loadHistoryUnmatched = async (historyId: number) => {
+    setUnmatchedLoading(true);
+    try {
+      const data = await apiRequest<UnmatchedVariantRow[]>(`/imports/history/${historyId}/unmatched-variants`);
+      setUnmatchedVariants(data || []);
+    } catch (e) {
+      message.error((e as Error).message);
+      setUnmatchedVariants([]);
+    } finally {
+      setUnmatchedLoading(false);
+    }
+  };
+
+  const openQuickVariant = async (gameName: string) => {
+    try {
+      setQuickProjects(await apiRequest<Array<{ id: number; name: string; status: string }>>("/projects"));
+    } catch {
+      setQuickProjects([]);
+    }
+    quickForm.resetFields();
+    quickForm.setFieldsValue({
+      project_id: undefined,
+      variant_name: gameName,
+      raw_game_name: gameName,
+      discount_type: "none",
+      version_type: "常规版",
+      server_type: "混服",
+      status: true,
+      publish_company: "广州熊动科技有限公司",
+    });
+    setQuickVariantOpen(true);
+  };
+
+  const submitQuickVariant = async () => {
+    let values: Record<string, unknown>;
+    try {
+      values = await quickForm.validateFields();
+    } catch {
+      return;
+    }
+    const payload = {
+      project_id: values.project_id as number,
+      variant_name: (values.variant_name as string).trim(),
+      raw_game_name: (values.raw_game_name as string).trim(),
+      discount_type: values.discount_type as string,
+      version_type: values.version_type as string,
+      server_type: values.server_type as string,
+      status: values.status ? "active" : "paused",
+      remark: "",
+      publish_company: ((values.publish_company as string) || "广州熊动科技有限公司").trim() || "广州熊动科技有限公司",
+      rd_company: null,
+      rd_share_percent: null,
+      publish_share_percent: null,
+      settlement_remark: null,
+    };
+    try {
+      await apiRequest("/game-variants", "POST", payload);
+      message.success("版本已创建；本次已导入流水仍为未匹配，新导入将自动匹配");
+      setQuickVariantOpen(false);
+      quickForm.resetFields();
+      if (historyDetail) {
+        await loadHistoryUnmatched(historyDetail.id);
+        await refreshVariantInfoMap();
+      }
+    } catch (e) {
+      message.error((e as Error).message);
+    }
+  };
+
   const openResolveModal = (ids: number[]) => {
     if (!ids.length) {
       message.warning("请先选择要处理的异常");
@@ -758,6 +849,11 @@ export default function ImportPage() {
                                 setSelectedIssueIds([]);
                                 loadHistoryIssues(r.id);
                                 loadHistoryDetail(r.id);
+                                if ((r.unmatched_variant_count ?? 0) > 0) {
+                                  loadHistoryUnmatched(r.id);
+                                } else {
+                                  setUnmatchedVariants([]);
+                                }
                               }}
                             >
                               详情
@@ -958,7 +1054,15 @@ export default function ImportPage() {
           background: #fff1f0 !important;
         }
       `}</style>
-      <Drawer open={!!historyDetail} title={`导入历史详情 #${historyDetail?.id || ""}`} onClose={() => setHistoryDetail(null)} width={680}>
+      <Drawer
+        open={!!historyDetail}
+        title={`导入历史详情 #${historyDetail?.id || ""}`}
+        onClose={() => {
+          setHistoryDetail(null);
+          setUnmatchedVariants([]);
+        }}
+        width={720}
+      >
         {historyDetail && (
           <Space direction="vertical" style={{ width: "100%" }} size={12}>
             <Table
@@ -988,6 +1092,42 @@ export default function ImportPage() {
               ]}
             />
             {(historyDetail.unmatched_variant_count ?? 0) > 0 && <Tag color="orange">部分数据未匹配到版本，后续统计可能不完整</Tag>}
+            {(historyDetail.unmatched_variant_count ?? 0) > 0 && (
+              <Card size="small" title="未匹配版本列表" loading={unmatchedLoading}>
+                <Table
+                  size="small"
+                  rowKey="game_name"
+                  dataSource={unmatchedVariants}
+                  pagination={false}
+                  locale={{ emptyText: <Empty description="暂无未匹配游戏名" /> }}
+                  columns={[
+                    { title: "原始游戏名", dataIndex: "game_name", ellipsis: true },
+                    { title: "出现次数", dataIndex: "count", width: 100 },
+                    { title: "最近账期", dataIndex: "period", width: 120 },
+                    {
+                      title: "操作",
+                      width: 240,
+                      render: (_, r) => (
+                        <Space wrap>
+                          <Button
+                            size="small"
+                            onClick={() => router.push(`/game-variants?keyword=${encodeURIComponent(r.game_name)}`)}
+                          >
+                            去版本管理
+                          </Button>
+                          <Button size="small" type="primary" onClick={() => openQuickVariant(r.game_name)}>
+                            快速新建版本
+                          </Button>
+                        </Space>
+                      ),
+                    },
+                  ]}
+                />
+                <Typography.Text type="secondary" style={{ display: "block", marginTop: 8 }}>
+                  说明：补建版本后，本次已导入的流水在库中仍为「未匹配版本」；重新导入后新数据会自动匹配。
+                </Typography.Text>
+              </Card>
+            )}
             <Card
               size="small"
               title="异常明细"
@@ -1072,6 +1212,70 @@ export default function ImportPage() {
           </Space>
         )}
       </Drawer>
+      <Modal
+        open={quickVariantOpen}
+        title="快速新建版本"
+        onCancel={() => {
+          setQuickVariantOpen(false);
+          quickForm.resetFields();
+        }}
+        onOk={submitQuickVariant}
+        width={520}
+        destroyOnClose
+      >
+        <Form form={quickForm} layout="vertical">
+          <Form.Item name="project_id" label="所属项目" rules={[{ required: true, message: "请选择项目" }]}>
+            <Select
+              showSearch
+              optionFilterProp="label"
+              options={quickProjects.map((p) => ({
+                label: `${p.name}${p.status !== "active" ? "（暂停）" : ""}`,
+                value: p.id,
+              }))}
+              placeholder="选择项目"
+            />
+          </Form.Item>
+          <Form.Item name="variant_name" label="版本名称" rules={[{ required: true, message: "请输入版本名称" }]}>
+            <Input />
+          </Form.Item>
+          <Form.Item name="raw_game_name" label="原始游戏名(raw)" rules={[{ required: true, message: "须与导入中的 game_name 一致" }]}>
+            <Input />
+          </Form.Item>
+          <Form.Item name="discount_type" label="折扣类型" rules={[{ required: true }]}>
+            <Select
+              options={[
+                { label: "无", value: "none" },
+                { label: "0.1 折", value: "0.1" },
+                { label: "0.05 折", value: "0.05" },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item name="version_type" label="版本类型" rules={[{ required: true }]}>
+            <Select
+              options={[
+                { label: "常规版", value: "常规版" },
+                { label: "联运版", value: "联运版" },
+                { label: "自运营版", value: "自运营版" },
+                { label: "折扣版", value: "折扣版" },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item name="server_type" label="服类型" rules={[{ required: true }]}>
+            <Select
+              options={[
+                { label: "混服", value: "混服" },
+                { label: "专服", value: "专服" },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item name="status" label="启用" valuePropName="checked">
+            <Switch />
+          </Form.Item>
+          <Form.Item name="publish_company" label="发行主体">
+            <Input placeholder="默认：广州熊动科技有限公司" />
+          </Form.Item>
+        </Form>
+      </Modal>
       <Modal open={resolveOpen} title="标记异常已处理" onCancel={() => setResolveOpen(false)} onOk={submitResolve} okText="确认处理">
         <Input.TextArea
           rows={3}

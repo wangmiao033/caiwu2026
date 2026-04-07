@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { Button, Card, Form, Input, InputNumber, Modal, Select, Space, Switch, Table, Tag, message } from "antd";
+import { Suspense, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { Button, Card, Form, Input, InputNumber, Modal, Select, Space, Spin, Switch, Table, Tag, message } from "antd";
 import { apiRequest } from "@/lib/api";
 
 type Project = { id: number; name: string; status: string };
@@ -57,10 +58,12 @@ const defaultFormValues = {
   settlement_remark: "",
 };
 
-export default function GameVariantsPage() {
+function GameVariantsPageContent() {
+  const searchParams = useSearchParams();
   const [projects, setProjects] = useState<Project[]>([]);
   const [rows, setRows] = useState<GameVariant[]>([]);
   const [filterProjectId, setFilterProjectId] = useState<number | undefined>(undefined);
+  const [keyword, setKeyword] = useState("");
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<GameVariant | null>(null);
   const [form] = Form.useForm();
@@ -99,8 +102,27 @@ export default function GameVariantsPage() {
   }, []);
 
   useEffect(() => {
+    const k = (searchParams.get("keyword") || "").trim();
+    setKeyword(k);
+  }, [searchParams]);
+
+  useEffect(() => {
     loadVariants();
   }, [filterProjectId]);
+
+  const filteredRows = useMemo(() => {
+    let list = rows;
+    if (filterProjectId != null) {
+      list = list.filter((r) => r.project_id === filterProjectId);
+    }
+    const q = keyword.trim().toLowerCase();
+    if (q) {
+      list = list.filter(
+        (r) => r.raw_game_name.toLowerCase().includes(q) || r.variant_name.toLowerCase().includes(q)
+      );
+    }
+    return list;
+  }, [rows, filterProjectId, keyword]);
 
   const submit = async () => {
     const values = await form.validateFields();
@@ -176,6 +198,13 @@ export default function GameVariantsPage() {
       title="游戏版本管理"
       extra={
         <Space wrap>
+          <Input
+            allowClear
+            placeholder="搜索原始游戏名 / 版本名"
+            style={{ width: 220 }}
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+          />
           <Select
             allowClear
             placeholder="按项目筛选"
@@ -193,7 +222,7 @@ export default function GameVariantsPage() {
     >
       <Table
         rowKey="id"
-        dataSource={rows}
+        dataSource={filteredRows}
         pagination={{ pageSize: 10 }}
         scroll={{ x: 1100 }}
         columns={[
@@ -338,5 +367,13 @@ export default function GameVariantsPage() {
         </Form>
       </Modal>
     </Card>
+  );
+}
+
+export default function GameVariantsPage() {
+  return (
+    <Suspense fallback={<Spin style={{ margin: 48 }} />}>
+      <GameVariantsPageContent />
+    </Suspense>
   );
 }

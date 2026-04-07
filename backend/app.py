@@ -2023,6 +2023,39 @@ def get_import_history_issues(history_id: int, db: Session = Depends(get_db), _:
     return result
 
 
+@app.get("/imports/history/{history_id}/unmatched-variants")
+def get_import_history_unmatched_variants(
+    history_id: int,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance, Role.ops, Role.biz])),
+):
+    history = db.get(ImportHistory, history_id)
+    if not history:
+        raise HTTPException(status_code=404, detail="导入历史不存在")
+    stmt = (
+        select(
+            RawStatement.game_name,
+            func.count(RawStatement.id).label("cnt"),
+            func.max(RawStatement.period).label("latest_period"),
+        )
+        .where(
+            RawStatement.recon_task_id == history.task_id,
+            RawStatement.variant_match_status == "未匹配版本",
+        )
+        .group_by(RawStatement.game_name)
+        .order_by(RawStatement.game_name.asc())
+    )
+    rows = db.execute(stmt).mappings().all()
+    return [
+        {
+            "game_name": row["game_name"],
+            "count": int(row["cnt"]),
+            "period": row["latest_period"] or history.period,
+        }
+        for row in rows
+    ]
+
+
 @app.get("/dashboard/finance")
 def finance_dashboard(db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz]))):
     total_receivable = db.scalar(select(func.coalesce(func.sum(Bill.amount), 0)))
