@@ -1,12 +1,19 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button, Card, Form, Input, Select, Space, Typography } from "antd";
 
 export default function LoginPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    const token = localStorage.getItem("fake_token");
+    if (token) {
+      router.replace("/home");
+    }
+  }, [router]);
 
   const onFinish = (values: { username: string; role: string }) => {
     setLoading(true);
