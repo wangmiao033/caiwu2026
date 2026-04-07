@@ -5,6 +5,7 @@ import enum
 import io
 import json
 import os
+import tempfile
 from decimal import Decimal
 from urllib import error as url_error
 from urllib import request as url_request
@@ -1489,9 +1490,10 @@ async def import_statement(
     filename = (file.filename or "").lower()
     if not (filename.endswith(".csv") or filename.endswith(".xlsx")):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仅支持 CSV / XLSX 文件"})
-    tmp = f"./tmp_{dt.datetime.now().timestamp()}.xlsx"
-    with open(tmp, "wb") as f:
+    suffix = ".csv" if filename.endswith(".csv") else ".xlsx"
+    with tempfile.NamedTemporaryFile(prefix="recon_import_", suffix=suffix, dir="/tmp", delete=False) as f:
         f.write(content)
+        tmp = f.name
     try:
         if filename.endswith(".csv"):
             df = pd.read_csv(tmp)
@@ -1513,7 +1515,8 @@ async def import_statement(
     except Exception as e:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仅支持 CSV / XLSX 文件"}) from e
     finally:
-        os.remove(tmp)
+        if os.path.exists(tmp):
+            os.remove(tmp)
     required = {"channel_name", "game_name", "gross_amount"}
     if not required.issubset(set(df.columns)):
         raise HTTPException(status_code=400, detail="缺少字段: channel_name, game_name, gross_amount")
