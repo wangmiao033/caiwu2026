@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.sqlite
+*.xlsx
+~$*.xlsx
+.env
+.venv/
+venv/
+
+web-admin/node_modules/
+web-admin/.next/
+streamlit-ui/.streamlit/
+
+.DS_Store
+Thumbs.db

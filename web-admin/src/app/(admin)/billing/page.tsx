@@ -1,0 +1,238 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { Button, Card, Descriptions, Drawer, Input, Modal, Select, Space, Switch, Table, Tag, message } from "antd";
+import { apiRequest } from "@/lib/api";
+import { BillingRule, calcTrialResult, matchRuleForBill } from "@/lib/billingTrial";
+
+type BillRow = {
+  id: number;
+  bill_type: "channel" | "rd";
+  period: string;
+  target_name: string;
+  amount: number;
+  status: string;
+  version: number;
+  collection_status: string;
+  gross_amount?: number;
+  channel_fee?: number;
+  tax_rate?: number;
+  rd_share?: number;
+  private_rate?: number;
+  settlement_amount?: number;
+  profit?: number;
+};
+
+export default function BillingPage() {
+  const [period, setPeriod] = useState("2026-03");
+  const [list, setList] = useState<BillRow[]>([]);
+  const [filterType, setFilterType] = useState<string>("");
+  const [filterText, setFilterText] = useState("");
+  const [sendingId, setSendingId] = useState<number | null>(null);
+  const [detail, setDetail] = useState<BillRow | null>(null);
+  const [showTrial, setShowTrial] = useState(false);
+  const [rules, setRules] = useState<BillingRule[]>([]);
+
+  useEffect(() => {
+    const cache = localStorage.getItem("billing_rules_local");
+    if (!cache) return;
+    try {
+      setRules(JSON.parse(cache));
+    } catch {}
+  }, []);
+
+  const generate = async () => {
+    Modal.confirm({
+      title: "确认生成账单",
+      content: `将按账期 ${period} 生成账单，是否继续？`,
+      onOk: async () => {
+        try {
+          const data = await apiRequest<Record<string, unknown>>(`/billing/generate?period=${encodeURIComponent(period)}&force_new_version=false`, "POST");
+          message.success(`生成完成: ${JSON.stringify(data)}`);
+          await loadBills();
+        } catch (e) {
+          message.error((e as Error).message);
+        }
+      },
+    });
+  };
+
+  const loadBills = async () => {
+    try {
+      const query = filterType ? `/billing/bills?bill_type=${filterType}` : "/billing/bills";
+      const data = await apiRequest<BillRow[]>(query);
+      setList(data);
+    } catch (e) {
+      message.error((e as Error).message);
+    }
+  };
+
+  const sendBill = async (id: number, status: string) => {
+    Modal.confirm({
+      title: "确认发送账单",
+      content: `确认将账单 ${id} 更新为 ${status} 吗？`,
+      onOk: async () => {
+        setSendingId(id);
+        try {
+          await apiRequest(`/billing/${id}/send`, "POST", { status, note: "前端发送" });
+          message.success("状态更新成功");
+          await loadBills();
+        } catch (e) {
+          message.error((e as Error).message);
+        } finally {
+          setSendingId(null);
+        }
+      },
+    });
+  };
+
+  const filtered = useMemo(
+    () => list.filter((x) => `${x.id}${x.target_name}${x.period}`.toLowerCase().includes(filterText.toLowerCase())),
+    [list, filterText]
+  );
+
+  const rowsWithTrial = useMemo(() => {
+    return filtered.map((bill) => {
+      const baseGross = Number(bill.gross_amount ?? bill.amount ?? 0);
+      const rule = matchRuleForBill(rules, bill.bill_type, bill.target_name);
+      const trial = calcTrialResult(baseGross, rule);
+      return { ...bill, trial };
+    });
+  }, [filtered, rules]);
+
+  const detailTrial = useMemo(() => {
+    if (!detail) return null;
+    const baseGross = Number(detail.gross_amount ?? detail.amount ?? 0);
+    const rule = matchRuleForBill(rules, detail.bill_type, detail.target_name);
+    return calcTrialResult(baseGross, rule);
+  }, [detail, rules]);
+
+  return (
+    <Space direction="vertical" size={16} style={{ width: "100%" }}>
+      <Card title="账单生成">
+        <Space>
+          <Input value={period} onChange={(e) => setPeriod(e.target.value)} placeholder="账期 2026-03" />
+          <Button type="primary" onClick={generate}>
+            生成账单
+          </Button>
+        </Space>
+      </Card>
+      <Card
+        title="账单列表"
+        extra={
+          <Space>
+            <Input placeholder="搜索" value={filterText} onChange={(e) => setFilterText(e.target.value)} />
+            <Select
+              placeholder="类型"
+              allowClear
+              style={{ width: 140 }}
+              options={[
+                { label: "渠道", value: "channel" },
+                { label: "研发", value: "rd" },
+              ]}
+              value={filterType || undefined}
+              onChange={(v) => setFilterType(v || "")}
+            />
+            <Button onClick={loadBills}>查询</Button>
+            <Space>
+              <span>显示试算结果</span>
+              <Switch checked={showTrial} onChange={setShowTrial} />
+            </Space>
+          </Space>
+        }
+      >
+        <Table
+          rowKey="id"
+          dataSource={rowsWithTrial}
+          pagination={{ pageSize: 10 }}
+          columns={[
+            { title: "ID", dataIndex: "id" },
+            { title: "类型", dataIndex: "bill_type", render: (v: string) => <Tag>{v}</Tag> },
+            { title: "账期", dataIndex: "period" },
+            { title: "对象", dataIndex: "target_name" },
+            { title: "流水(预留)", dataIndex: "gross_amount", render: (v: number) => v ?? "-" },
+            { title: "通道费(预留)", dataIndex: "channel_fee", render: (v: number) => v ?? "-" },
+            { title: "税点(预留)", dataIndex: "tax_rate", render: (v: number) => v ?? "-" },
+            { title: "研发分成(预留)", dataIndex: "rd_share", render: (v: number) => v ?? "-" },
+            { title: "私点(预留)", dataIndex: "private_rate", render: (v: number) => v ?? "-" },
+            { title: "金额", dataIndex: "amount" },
+            { title: "结算金额(预留)", dataIndex: "settlement_amount", render: (v: number) => v ?? "-" },
+            { title: "利润(预留)", dataIndex: "profit", render: (v: number) => v ?? "-" },
+            ...(showTrial
+              ? [
+                  {
+                    title: "规则状态",
+                    dataIndex: ["trial", "matched"],
+                    render: (v: boolean) => <Tag color={v ? "green" : "red"}>{v ? "已匹配规则" : "未配置规则"}</Tag>,
+                  },
+                  { title: "折扣后流水", dataIndex: ["trial", "discountedGross"], render: (v: number) => (v ?? "-") },
+                  { title: "通道费金额", dataIndex: ["trial", "channelFeeAmount"], render: (v: number) => (v ?? "-") },
+                  { title: "税额", dataIndex: ["trial", "taxAmount"], render: (v: number) => (v ?? "-") },
+                  { title: "研发分成金额", dataIndex: ["trial", "rdShareAmount"], render: (v: number) => (v ?? "-") },
+                  { title: "私点金额", dataIndex: ["trial", "privateAmount"], render: (v: number) => (v ?? "-") },
+                  { title: "试算结算金额", dataIndex: ["trial", "settlementAmount"], render: (v: number) => (v ?? "-") },
+                  { title: "试算利润", dataIndex: ["trial", "profit"], render: (v: number) => (v ?? "-") },
+                ]
+              : []),
+            { title: "版本", dataIndex: "version" },
+            {
+              title: "发送状态",
+              dataIndex: "status",
+              render: (v: string) => <Tag color={v === "有异议" ? "red" : v === "对方确认" ? "green" : "blue"}>{v}</Tag>,
+            },
+            { title: "回款状态", dataIndex: "collection_status" },
+            {
+              title: "操作",
+              render: (_, r) => (
+                <Space>
+                  <Button size="small" onClick={() => setDetail(r)}>
+                    详情
+                  </Button>
+                  <Button size="small" loading={sendingId === r.id} onClick={() => sendBill(r.id, "已发送")}>
+                    发送
+                  </Button>
+                  <Button size="small" onClick={() => sendBill(r.id, "对方确认")}>
+                    确认
+                  </Button>
+                </Space>
+              ),
+            },
+          ]}
+        />
+      </Card>
+      <Drawer open={!!detail} title={`账单详情 #${detail?.id || ""}`} width={560} onClose={() => setDetail(null)}>
+        {detail && (
+          <Space direction="vertical" style={{ width: "100%" }} size={12}>
+            <Descriptions column={1} bordered>
+              <Descriptions.Item label="账单类型">{detail.bill_type}</Descriptions.Item>
+              <Descriptions.Item label="账期">{detail.period}</Descriptions.Item>
+              <Descriptions.Item label="对象">{detail.target_name}</Descriptions.Item>
+              <Descriptions.Item label="金额">{detail.amount}</Descriptions.Item>
+              <Descriptions.Item label="状态">{detail.status}</Descriptions.Item>
+              <Descriptions.Item label="规则来源说明">
+                当前账单规则来自系统“规则配置”页（游戏+渠道维度）。<br />
+                折扣/通道费/税点/研发分成/私点将作为自动计算依据。<br />
+                当前接口若未返回明细字段，则前端展示预留列，待后端逐步补全。
+              </Descriptions.Item>
+            </Descriptions>
+            <Card size="small" title="试算明细（前端预览，不替代正式结算）">
+              <Descriptions column={1} bordered size="small">
+                <Descriptions.Item label="规则匹配">{detailTrial?.matched ? `已匹配：${detailTrial.ruleName}` : "未配置规则"}</Descriptions.Item>
+                <Descriptions.Item label="折扣后流水">{detailTrial?.discountedGross ?? "-"}</Descriptions.Item>
+                <Descriptions.Item label="通道费金额">{detailTrial?.channelFeeAmount ?? "-"}</Descriptions.Item>
+                <Descriptions.Item label="税额">{detailTrial?.taxAmount ?? "-"}</Descriptions.Item>
+                <Descriptions.Item label="研发分成金额">{detailTrial?.rdShareAmount ?? "-"}</Descriptions.Item>
+                <Descriptions.Item label="私点金额">{detailTrial?.privateAmount ?? "-"}</Descriptions.Item>
+                <Descriptions.Item label="试算结算金额">{detailTrial?.settlementAmount ?? "-"}</Descriptions.Item>
+                <Descriptions.Item label="试算利润">{detailTrial?.profit ?? "-"}</Descriptions.Item>
+                <Descriptions.Item label="公式说明">
+                  折扣后流水=原流水*折扣系数；通道费金额=折扣后流水*通道费比例；税额=折扣后流水*税点比例；研发分成金额=折扣后流水*研发分成比例；私点金额=折扣后流水*私点比例；试算结算金额=折扣后流水-通道费金额-税额-研发分成金额-私点金额；试算利润=试算结算金额。
+                </Descriptions.Item>
+              </Descriptions>
+            </Card>
+          </Space>
+        )}
+      </Drawer>
+    </Space>
+  );
+}
