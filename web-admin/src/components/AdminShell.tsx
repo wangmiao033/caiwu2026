@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   AppstoreOutlined,
   ApartmentOutlined,
+  AlertOutlined,
   AuditOutlined,
   CheckCircleOutlined,
   ClusterOutlined,
@@ -35,6 +36,7 @@ const menuItems = [
   { key: "/recon-tasks", icon: <CheckCircleOutlined />, label: "核对任务" },
   { key: "/billing", icon: <ReconciliationOutlined />, label: "账单管理" },
   { key: "/billing-rules", icon: <SettingOutlined />, label: "规则配置" },
+  { key: "/exceptions", icon: <AlertOutlined />, label: "异常中心" },
   { key: "/invoices", icon: <FileTextOutlined />, label: "发票管理" },
   { key: "/receipts", icon: <MoneyCollectOutlined />, label: "回款管理" },
   { key: "/finance", icon: <DollarOutlined />, label: "财务看板" },

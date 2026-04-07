@@ -74,11 +74,11 @@ export default function HomePage() {
   const trendData = useMemo(() => createMockTrend(range), [range]);
 
   const abnormalRows: AlertRow[] = [
-    { key: "share", type: "分成异常", count: 6, detail: "合计不等于100%", to: "/channel-game-map" },
-    { key: "channel", type: "未匹配渠道", count: 4, detail: "导入记录中存在渠道未映射", to: "/channel-game-map" },
-    { key: "game", type: "未匹配游戏", count: 9, detail: "导入记录中存在游戏未匹配版本", to: "/import" },
-    { key: "importFail", type: "导入失败记录", count: 3, detail: "近7天导入失败需复核", to: "/import" },
-    { key: "overdue", type: "超期未结算", count: 7, detail: "超过约定结算周期", to: "/billing" },
+    { key: "share", type: "分成异常", count: 6, detail: "合计不等于100%", to: "/exceptions?type=share" },
+    { key: "channel", type: "未匹配渠道", count: 4, detail: "导入记录中存在渠道未映射", to: "/exceptions?type=channel" },
+    { key: "game", type: "未匹配游戏", count: 9, detail: "导入记录中存在游戏未匹配版本", to: "/exceptions?type=game" },
+    { key: "importFail", type: "导入失败记录", count: 3, detail: "近7天导入失败需复核", to: "/exceptions?type=import" },
+    { key: "overdue", type: "超期未结算", count: 7, detail: "超过约定结算周期", to: "/exceptions?type=overdue" },
   ];
 
   const quickActions = [
