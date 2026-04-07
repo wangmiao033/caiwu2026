@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Button, Card, Form, Input, Modal, Select, Space, Switch, Table, Tag, message } from "antd";
+import { Button, Card, Form, Input, InputNumber, Modal, Select, Space, Switch, Table, Tag, message } from "antd";
 import { apiRequest } from "@/lib/api";
 
 type Project = { id: number; name: string; status: string };
@@ -15,6 +15,11 @@ type GameVariant = {
   server_type: string;
   status: string;
   remark: string;
+  rd_company?: string | null;
+  publish_company?: string | null;
+  rd_share_percent?: number | null;
+  publish_share_percent?: number | null;
+  settlement_remark?: string | null;
   created_at: string;
 };
 
@@ -45,6 +50,11 @@ const defaultFormValues = {
   server_type: "混服",
   status: true,
   remark: "",
+  rd_company: "",
+  publish_company: "广州熊动科技有限公司",
+  rd_share_percent: undefined as number | undefined,
+  publish_share_percent: undefined as number | undefined,
+  settlement_remark: "",
 };
 
 export default function GameVariantsPage() {
@@ -103,6 +113,11 @@ export default function GameVariantsPage() {
       server_type: values.server_type as string,
       status: values.status ? "active" : "paused",
       remark: ((values.remark as string) || "").trim(),
+      rd_company: ((values.rd_company as string) || "").trim() || null,
+      publish_company: ((values.publish_company as string) || "").trim() || "广州熊动科技有限公司",
+      rd_share_percent: typeof values.rd_share_percent === "number" ? values.rd_share_percent : null,
+      publish_share_percent: typeof values.publish_share_percent === "number" ? values.publish_share_percent : null,
+      settlement_remark: ((values.settlement_remark as string) || "").trim() || null,
     };
     try {
       if (editing) {
@@ -147,6 +162,11 @@ export default function GameVariantsPage() {
       server_type: r.server_type,
       status: r.status === "active",
       remark: r.remark,
+      rd_company: r.rd_company || "",
+      publish_company: r.publish_company || "广州熊动科技有限公司",
+      rd_share_percent: r.rd_share_percent ?? undefined,
+      publish_share_percent: r.publish_share_percent ?? undefined,
+      settlement_remark: r.settlement_remark || "",
     });
     setOpen(true);
   };
@@ -193,6 +213,20 @@ export default function GameVariantsPage() {
           },
           { title: "版本类型", dataIndex: "version_type", width: 100 },
           { title: "服类型", dataIndex: "server_type", width: 80 },
+          { title: "研发主体", dataIndex: "rd_company", width: 160, ellipsis: true, render: (v: string) => v || "-" },
+          { title: "发行主体", dataIndex: "publish_company", width: 180, ellipsis: true, render: (v: string) => v || "-" },
+          {
+            title: "研发分成",
+            dataIndex: "rd_share_percent",
+            width: 100,
+            render: (v: number | null) => (typeof v === "number" ? `${v}%` : "-"),
+          },
+          {
+            title: "发行分成",
+            dataIndex: "publish_share_percent",
+            width: 100,
+            render: (v: number | null) => (typeof v === "number" ? `${v}%` : "-"),
+          },
           { title: "备注", dataIndex: "remark", ellipsis: true, width: 120 },
           {
             title: "状态",
@@ -224,7 +258,20 @@ export default function GameVariantsPage() {
         width={560}
         destroyOnClose
       >
-        <Form form={form} layout="vertical">
+        <Form
+          form={form}
+          layout="vertical"
+          onValuesChange={(changedValues) => {
+            if (Object.prototype.hasOwnProperty.call(changedValues, "rd_share_percent")) {
+              const rd = changedValues.rd_share_percent as number | null | undefined;
+              if (typeof rd === "number") {
+                form.setFieldValue("publish_share_percent", Number((100 - rd).toFixed(2)));
+              } else {
+                form.setFieldValue("publish_share_percent", undefined);
+              }
+            }
+          }}
+        >
           <Form.Item name="project_id" label="所属项目" rules={[{ required: true, message: "请选择项目" }]}>
             <Select
               placeholder="选择项目"
@@ -257,6 +304,33 @@ export default function GameVariantsPage() {
           </Form.Item>
           <Form.Item name="status" label="启用" valuePropName="checked" initialValue>
             <Switch />
+          </Form.Item>
+          <Form.Item name="rd_company" label="研发主体">
+            <Input placeholder="可为空" />
+          </Form.Item>
+          <Form.Item name="publish_company" label="发行主体" initialValue="广州熊动科技有限公司">
+            <Input placeholder="默认：广州熊动科技有限公司" />
+          </Form.Item>
+          <Form.Item
+            name="rd_share_percent"
+            label="研发分成(%)"
+            rules={[
+              {
+                validator: (_, value: number | undefined) => {
+                  if (value == null) return Promise.resolve();
+                  if (value >= 0 && value <= 100) return Promise.resolve();
+                  return Promise.reject(new Error("研发分成需在 0~100 之间"));
+                },
+              },
+            ]}
+          >
+            <InputNumber min={0} max={100} step={0.01} precision={2} style={{ width: "100%" }} />
+          </Form.Item>
+          <Form.Item name="publish_share_percent" label="发行分成(%)">
+            <InputNumber min={0} max={100} step={0.01} precision={2} style={{ width: "100%" }} disabled />
+          </Form.Item>
+          <Form.Item name="settlement_remark" label="结算备注">
+            <Input.TextArea rows={2} placeholder="可为空" />
           </Form.Item>
           <Form.Item name="remark" label="备注">
             <Input.TextArea rows={2} placeholder="可选" />

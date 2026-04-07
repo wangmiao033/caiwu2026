@@ -22,7 +22,9 @@ from sqlalchemy import (
     String,
     create_engine,
     func,
+    inspect,
     select,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
@@ -183,6 +185,11 @@ class GameVariant(Base):
     server_type: Mapped[ServerType] = mapped_column(Enum(ServerType), default=ServerType.mixed)
     status: Mapped[VariantStatus] = mapped_column(Enum(VariantStatus), default=VariantStatus.active)
     remark: Mapped[str] = mapped_column(String(500), default="")
+    rd_company: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    publish_company: Mapped[str] = mapped_column(String(200), default="广州熊动科技有限公司")
+    rd_share_percent: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    publish_share_percent: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    settlement_remark: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
     project: Mapped[Project] = relationship()
 
@@ -388,6 +395,11 @@ class GameVariantIn(BaseModel):
     server_type: ServerType = ServerType.mixed
     status: VariantStatus = VariantStatus.active
     remark: str = ""
+    rd_company: Optional[str] = None
+    publish_company: Optional[str] = "广州熊动科技有限公司"
+    rd_share_percent: Optional[Decimal] = None
+    publish_share_percent: Optional[Decimal] = None
+    settlement_remark: Optional[str] = None
 
 
 class VariantStatusPatch(BaseModel):
@@ -610,12 +622,48 @@ def create_default_data(db: Session):
     db.commit()
 
 
+def ensure_game_variant_settlement_columns():
+    inspector = inspect(engine)
+    if "game_variants" not in inspector.get_table_names():
+        return
+    existing = {c["name"] for c in inspector.get_columns("game_variants")}
+    statements: list[str] = []
+    if "rd_company" not in existing:
+        statements.append("ALTER TABLE game_variants ADD COLUMN rd_company VARCHAR(200)")
+    if "publish_company" not in existing:
+        statements.append("ALTER TABLE game_variants ADD COLUMN publish_company VARCHAR(200) DEFAULT '广州熊动科技有限公司'")
+    if "rd_share_percent" not in existing:
+        statements.append("ALTER TABLE game_variants ADD COLUMN rd_share_percent NUMERIC(6,2)")
+    if "publish_share_percent" not in existing:
+        statements.append("ALTER TABLE game_variants ADD COLUMN publish_share_percent NUMERIC(6,2)")
+    if "settlement_remark" not in existing:
+        statements.append("ALTER TABLE game_variants ADD COLUMN settlement_remark VARCHAR(500)")
+    if not statements:
+        return
+    with engine.begin() as conn:
+        for stmt in statements:
+            conn.execute(text(stmt))
+
+
+def normalize_variant_shares(payload: GameVariantIn) -> tuple[Optional[Decimal], Optional[Decimal]]:
+    rd_share = payload.rd_share_percent
+    publish_share = payload.publish_share_percent
+    if rd_share is not None and (rd_share < 0 or rd_share > 100):
+        raise HTTPException(status_code=400, detail="研发分成需在 0~100 之间")
+    if publish_share is not None and (publish_share < 0 or publish_share > 100):
+        raise HTTPException(status_code=400, detail="发行分成需在 0~100 之间")
+    if rd_share is not None and publish_share is None:
+        publish_share = Decimal("100") - rd_share
+    return rd_share, publish_share
+
+
 app = FastAPI(title="内部对账系统", version="1.0.0")
 
 
 @app.on_event("startup")
 def startup():
     Base.metadata.create_all(bind=engine)
+    ensure_game_variant_settlement_columns()
     with SessionLocal() as db:
         create_default_data(db)
 
@@ -869,6 +917,7 @@ def create_game_variant(payload: GameVariantIn, db: Session = Depends(get_db), c
     dup = db.scalar(select(GameVariant).where(GameVariant.raw_game_name == raw))
     if dup:
         raise HTTPException(status_code=400, detail="原始游戏名已存在")
+    rd_share, publish_share = normalize_variant_shares(payload)
     row = GameVariant(
         project_id=payload.project_id,
         variant_name=variant,
@@ -878,6 +927,11 @@ def create_game_variant(payload: GameVariantIn, db: Session = Depends(get_db), c
         server_type=payload.server_type,
         status=payload.status,
         remark=(payload.remark or "").strip(),
+        rd_company=(payload.rd_company or "").strip() or None,
+        publish_company=(payload.publish_company or "广州熊动科技有限公司").strip() or "广州熊动科技有限公司",
+        rd_share_percent=rd_share,
+        publish_share_percent=publish_share,
+        settlement_remark=(payload.settlement_remark or "").strip() or None,
     )
     db.add(row)
     db.flush()
@@ -905,6 +959,7 @@ def update_game_variant(
     dup = db.scalar(select(GameVariant).where(GameVariant.raw_game_name == raw, GameVariant.id != variant_id))
     if dup:
         raise HTTPException(status_code=400, detail="原始游戏名已存在")
+    rd_share, publish_share = normalize_variant_shares(payload)
     row.project_id = payload.project_id
     row.variant_name = variant
     row.raw_game_name = raw
@@ -913,6 +968,11 @@ def update_game_variant(
     row.server_type = payload.server_type
     row.status = payload.status
     row.remark = (payload.remark or "").strip()
+    row.rd_company = (payload.rd_company or "").strip() or None
+    row.publish_company = (payload.publish_company or "广州熊动科技有限公司").strip() or "广州熊动科技有限公司"
+    row.rd_share_percent = rd_share
+    row.publish_share_percent = publish_share
+    row.settlement_remark = (payload.settlement_remark or "").strip() or None
     write_system_audit(db, ctx["user"], "update_game_variant", "game_variant", str(row.id), f"编辑版本: {variant}")
     db.commit()
     return row
