@@ -1,10 +1,11 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Alert, Button, Card, Col, Row, Segmented, Space, Statistic, Table, Tag, Typography } from "antd";
+import { Alert, Button, Card, Col, Result, Row, Segmented, Skeleton, Space, Statistic, Table, Tag, Typography, message } from "antd";
 import { Line } from "@ant-design/charts";
 import dayjs from "dayjs";
+import { DashboardOverview, DashboardRange, getDashboardOverview } from "@/lib/api/dashboard";
 
 type KpiItem = {
   key: string;
@@ -13,11 +14,7 @@ type KpiItem = {
   mom: number;
 };
 
-type TrendPoint = {
-  date: string;
-  type: "流水" | "回款" | "利润";
-  amount: number;
-};
+type TrendPoint = DashboardOverview["trends"][number];
 
 type AlertRow = {
   key: string;
@@ -44,42 +41,60 @@ const formatMom = (mom: number) => {
   return mom > 0 ? `环比 ↑ ${absPercent}` : `环比 ↓ ${absPercent}`;
 };
 
-const createMockTrend = (days: number): TrendPoint[] => {
-  const rows: TrendPoint[] = [];
-  for (let i = days - 1; i >= 0; i -= 1) {
-    const date = dayjs().subtract(i, "day").format("MM-DD");
-    const dailyFlow = 130000 + (days - i) * 2800 + (i % 3) * 3800;
-    const dailyReceived = dailyFlow * 0.84;
-    const dailyProfit = dailyReceived - dailyFlow * 0.26;
-    rows.push({ date, type: "流水", amount: Number(dailyFlow.toFixed(2)) });
-    rows.push({ date, type: "回款", amount: Number(dailyReceived.toFixed(2)) });
-    rows.push({ date, type: "利润", amount: Number(dailyProfit.toFixed(2)) });
-  }
-  return rows;
-};
-
 export default function HomePage() {
   const router = useRouter();
   const [range, setRange] = useState<7 | 30>(7);
+  const [loading, setLoading] = useState(true);
+  const [errorText, setErrorText] = useState("");
+  const [overview, setOverview] = useState<DashboardOverview | null>(null);
 
-  const kpis: KpiItem[] = [
-    { key: "flow", title: "本月总流水", value: 3860000, mom: 8.4 },
-    { key: "received", title: "本月渠道回款", value: 3174000, mom: 6.1 },
-    { key: "rdPayable", title: "本月应付研发", value: 1012000, mom: -2.7 },
-    { key: "grossProfit", title: "本月毛利润", value: 2162000, mom: 11.3 },
-    { key: "unsettled", title: "未结算金额", value: 628500, mom: -4.6 },
-    { key: "abnormalBills", title: "异常账单数量", value: 19, mom: 15.2 },
-  ];
+  const fetchOverview = async (nextRange: 7 | 30) => {
+    setLoading(true);
+    setErrorText("");
+    try {
+      const apiRange: DashboardRange = nextRange === 7 ? "7d" : "30d";
+      const data = await getDashboardOverview(apiRange);
+      setOverview(data);
+    } catch (error) {
+      const msg = (error as Error).message || "获取首页数据失败";
+      setErrorText(msg);
+      message.error(msg);
+    } finally {
+      setLoading(false);
+    }
+  };
 
-  const trendData = useMemo(() => createMockTrend(range), [range]);
+  useEffect(() => {
+    fetchOverview(range);
+  }, [range]);
 
-  const abnormalRows: AlertRow[] = [
-    { key: "share", type: "分成异常", count: 6, detail: "合计不等于100%", to: "/exceptions?type=share" },
-    { key: "channel", type: "未匹配渠道", count: 4, detail: "导入记录中存在渠道未映射", to: "/exceptions?type=channel" },
-    { key: "game", type: "未匹配游戏", count: 9, detail: "导入记录中存在游戏未匹配版本", to: "/exceptions?type=game" },
-    { key: "importFail", type: "导入失败记录", count: 3, detail: "近7天导入失败需复核", to: "/exceptions?type=import" },
-    { key: "overdue", type: "超期未结算", count: 7, detail: "超过约定结算周期", to: "/exceptions?type=overdue" },
-  ];
+  const kpis: KpiItem[] = useMemo(
+    () => [
+      { key: "flow", title: "本月总流水", value: Number(overview?.summary.monthly_gross_revenue || 0), mom: Number(overview?.summary_compare.monthly_gross_revenue || 0) },
+      { key: "received", title: "本月渠道回款", value: Number(overview?.summary.monthly_channel_receipts || 0), mom: Number(overview?.summary_compare.monthly_channel_receipts || 0) },
+      { key: "rdPayable", title: "本月应付研发", value: Number(overview?.summary.monthly_rd_payable || 0), mom: Number(overview?.summary_compare.monthly_rd_payable || 0) },
+      { key: "grossProfit", title: "本月毛利润", value: Number(overview?.summary.monthly_gross_profit || 0), mom: Number(overview?.summary_compare.monthly_gross_profit || 0) },
+      { key: "unsettled", title: "未结算金额", value: Number(overview?.summary.unsettled_amount || 0), mom: Number(overview?.summary_compare.unsettled_amount || 0) },
+      { key: "abnormalBills", title: "异常账单数量", value: Number(overview?.summary.exception_bill_count || 0), mom: Number(overview?.summary_compare.exception_bill_count || 0) },
+    ],
+    [overview]
+  );
+
+  const trendData: TrendPoint[] = useMemo(
+    () => (overview?.trends || []).map((item) => ({ ...item, date: dayjs(item.date).format("MM-DD") })),
+    [overview]
+  );
+
+  const abnormalRows: AlertRow[] = useMemo(
+    () => [
+      { key: "share", type: "分成异常", count: Number(overview?.exceptions.share || 0), detail: "合计不等于100%", to: "/exceptions?type=share" },
+      { key: "channel", type: "未匹配渠道", count: Number(overview?.exceptions.channel || 0), detail: "导入记录中存在渠道未映射", to: "/exceptions?type=channel" },
+      { key: "game", type: "未匹配游戏", count: Number(overview?.exceptions.game || 0), detail: "导入记录中存在游戏未匹配版本", to: "/exceptions?type=game" },
+      { key: "importFail", type: "导入失败记录", count: Number(overview?.exceptions.import || 0), detail: "导入失败记录需复核", to: "/exceptions?type=import" },
+      { key: "overdue", type: "超期未结算", count: Number(overview?.exceptions.overdue || 0), detail: "超过约定结算周期", to: "/exceptions?type=overdue" },
+    ],
+    [overview]
+  );
 
   const quickActions = [
     { key: "newImport", text: "新建导入", to: "/import" },
@@ -89,34 +104,47 @@ export default function HomePage() {
     { key: "billing", text: "账单列表", to: "/billing" },
   ];
 
-  const recentLogs: ActionLogRow[] = [
-    { key: "1", operator: "财务A", actionType: "导入记录", time: "2026-04-07 10:21", detail: "导入2026-03渠道流水，新增122行" },
-    { key: "2", operator: "运营B", actionType: "修改规则", time: "2026-04-07 09:43", detail: "调整 渠道X-游戏Y 研发分成为45%" },
-    { key: "3", operator: "财务A", actionType: "修改渠道映射", time: "2026-04-06 18:32", detail: "新增 渠道M -> 游戏N 映射" },
-    { key: "4", operator: "财务C", actionType: "导入记录", time: "2026-04-06 16:05", detail: "导入2026-03补充流水，更新54行" },
-    { key: "5", operator: "运营B", actionType: "修改规则", time: "2026-04-06 11:27", detail: "修正税点为3%" },
-    { key: "6", operator: "财务A", actionType: "导入记录", time: "2026-04-05 19:10", detail: "导入失败3行，已导出异常并修复" },
-    { key: "7", operator: "财务C", actionType: "修改渠道映射", time: "2026-04-05 15:44", detail: "补充未匹配渠道2条" },
-    { key: "8", operator: "运营D", actionType: "修改规则", time: "2026-04-04 17:19", detail: "新增 游戏Z 渠道分成规则" },
-    { key: "9", operator: "财务A", actionType: "导入记录", time: "2026-04-04 10:56", detail: "导入2026-04首批流水" },
-    { key: "10", operator: "财务C", actionType: "修改规则", time: "2026-04-03 14:08", detail: "批量更新私点比例" },
-  ];
+  const recentLogs: ActionLogRow[] = useMemo(
+    () =>
+      (overview?.recent_activities || []).map((item) => ({
+        key: String(item.id),
+        operator: item.operator || "-",
+        actionType: item.action_type || "-",
+        time: item.created_at ? dayjs(item.created_at).format("YYYY-MM-DD HH:mm") : "-",
+        detail: item.detail || "-",
+      })),
+    [overview]
+  );
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
-      <Alert
-        type="info"
-        showIcon
-        message="当前为 Dashboard Mock 数据展示版"
-        description="后续后端提供统计接口后，可直接替换 mock 数据源。"
-      />
+      {errorText ? (
+        <Result
+          status="warning"
+          title="首页数据加载失败"
+          subTitle={errorText}
+          extra={
+            <Button type="primary" onClick={() => fetchOverview(range)}>
+              重试
+            </Button>
+          }
+        />
+      ) : null}
+
+      <Alert type="info" showIcon message="首页已接入真实后端统计数据" description="支持 7天/30天 切换并实时刷新核心指标、趋势、异常与最近操作。" />
 
       <Row gutter={[16, 16]}>
         {kpis.map((item) => (
           <Col key={item.key} xs={24} sm={12} lg={8} xl={8}>
             <Card>
-              <Statistic title={item.title} value={item.value} formatter={(value) => formatMoney(Number(value || 0))} />
-              <Typography.Text type={item.mom >= 0 ? "success" : "danger"}>{formatMom(item.mom)}</Typography.Text>
+              {loading ? (
+                <Skeleton active paragraph={{ rows: 1 }} title={false} />
+              ) : (
+                <>
+                  <Statistic title={item.title} value={item.value} formatter={(value) => formatMoney(Number(value || 0))} />
+                  <Typography.Text type={item.mom >= 0 ? "success" : "danger"}>{formatMom(item.mom)}</Typography.Text>
+                </>
+              )}
             </Card>
           </Col>
         ))}
@@ -135,22 +163,26 @@ export default function HomePage() {
           />
         }
       >
-        <Line
-          data={trendData}
-          xField="date"
-          yField="amount"
-          colorField="type"
-          axis={{
-            y: {
-              labelFormatter: (value: string) => formatMoney(Number(value || 0)),
-            },
-          }}
-          tooltip={{
-            items: [{ channel: "y", valueFormatter: (value: string | number) => formatMoney(Number(value || 0)) }],
-          }}
-          smooth
-          height={320}
-        />
+        {loading ? (
+          <Skeleton active paragraph={{ rows: 8 }} title={false} />
+        ) : (
+          <Line
+            data={trendData}
+            xField="date"
+            yField="amount"
+            colorField="type"
+            axis={{
+              y: {
+                labelFormatter: (value: string) => formatMoney(Number(value || 0)),
+              },
+            }}
+            tooltip={{
+              items: [{ channel: "y", valueFormatter: (value: string | number) => formatMoney(Number(value || 0)) }],
+            }}
+            smooth
+            height={320}
+          />
+        )}
       </Card>
 
       <Row gutter={[16, 16]}>
@@ -160,6 +192,7 @@ export default function HomePage() {
               rowKey="key"
               dataSource={abnormalRows}
               size="small"
+              loading={loading}
               pagination={false}
               columns={[
                 { title: "类型", dataIndex: "type", width: 120 },
@@ -196,6 +229,7 @@ export default function HomePage() {
           rowKey="key"
           dataSource={recentLogs}
           size="small"
+          loading={loading}
           pagination={false}
           columns={[
             { title: "操作人", dataIndex: "operator", width: 120 },

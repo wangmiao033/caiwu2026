@@ -2185,6 +2185,263 @@ def finance_dashboard(db: Session = Depends(get_db), _: dict = Depends(require_r
     }
 
 
+def _parse_dashboard_range(range_text: str) -> int:
+    mapping = {"7d": 7, "30d": 30}
+    if range_text not in mapping:
+        raise HTTPException(status_code=400, detail="range 仅支持 7d 或 30d")
+    return mapping[range_text]
+
+
+def _safe_ratio_change(current: Decimal, previous: Decimal) -> float:
+    if previous == 0:
+        return 0.0 if current == 0 else 100.0
+    return float(((current - previous) / previous) * Decimal("100"))
+
+
+@app.get("/dashboard/overview")
+def dashboard_overview(
+    range: str = Query(default="7d"),
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops])),
+):
+    days = _parse_dashboard_range(range)
+    today = dt.date.today()
+    month_start = today.replace(day=1)
+    prev_month_end = month_start - dt.timedelta(days=1)
+    prev_month_start = prev_month_end.replace(day=1)
+    current_period = today.strftime("%Y-%m")
+    prev_period = prev_month_start.strftime("%Y-%m")
+
+    # 口径：本月总流水 = raw_statements 在当前自然月账期(period=YYYY-MM)的 gross_amount 汇总
+    monthly_gross_revenue = Decimal(
+        str(db.scalar(select(func.coalesce(func.sum(RawStatement.gross_amount), 0)).where(RawStatement.period == current_period)) or 0)
+    )
+    previous_month_gross_revenue = Decimal(
+        str(db.scalar(select(func.coalesce(func.sum(RawStatement.gross_amount), 0)).where(RawStatement.period == prev_period)) or 0)
+    )
+
+    # 口径：本月渠道回款 = Receipt 关联 Bill(period=当前月) 的实际回款金额汇总
+    monthly_channel_receipts = Decimal(
+        str(
+            db.scalar(
+                select(func.coalesce(func.sum(Receipt.amount), 0))
+                .select_from(Receipt)
+                .join(Bill, Bill.id == Receipt.bill_id)
+                .where(Bill.period == current_period)
+            )
+            or 0
+        )
+    )
+    previous_month_channel_receipts = Decimal(
+        str(
+            db.scalar(
+                select(func.coalesce(func.sum(Receipt.amount), 0))
+                .select_from(Receipt)
+                .join(Bill, Bill.id == Receipt.bill_id)
+                .where(Bill.period == prev_period)
+            )
+            or 0
+        )
+    )
+
+    # 口径：本月应付研发 = rd 账单(BillType.rd)在当前月账期的 amount 汇总
+    monthly_rd_payable = Decimal(
+        str(
+            db.scalar(
+                select(func.coalesce(func.sum(Bill.amount), 0)).where(Bill.bill_type == BillType.rd, Bill.period == current_period)
+            )
+            or 0
+        )
+    )
+    previous_month_rd_payable = Decimal(
+        str(
+            db.scalar(
+                select(func.coalesce(func.sum(Bill.amount), 0)).where(Bill.bill_type == BillType.rd, Bill.period == prev_period)
+            )
+            or 0
+        )
+    )
+
+    # 口径：本月毛利润 = 本月渠道回款 - 本月应付研发
+    monthly_gross_profit = monthly_channel_receipts - monthly_rd_payable
+    previous_month_gross_profit = previous_month_channel_receipts - previous_month_rd_payable
+
+    # 口径：未结算金额 = 所有未完全回款账单(amount - 已回款)的剩余金额汇总
+    receipt_sum = (
+        select(Receipt.bill_id.label("bill_id"), func.coalesce(func.sum(Receipt.amount), 0).label("received_total"))
+        .group_by(Receipt.bill_id)
+        .subquery("receipt_sum")
+    )
+    outstanding_stmt = (
+        select(func.coalesce(func.sum(Bill.amount - func.coalesce(receipt_sum.c.received_total, 0)), 0))
+        .select_from(Bill)
+        .outerjoin(receipt_sum, receipt_sum.c.bill_id == Bill.id)
+        .where(Bill.collection_status != CollectionStatus.paid)
+    )
+    unsettled_amount = Decimal(str(db.scalar(outstanding_stmt) or 0))
+    previous_unsettled_amount = Decimal(
+        str(
+            db.scalar(
+                select(func.coalesce(func.sum(Bill.amount), 0)).where(
+                    Bill.collection_status != CollectionStatus.paid,
+                    Bill.period == prev_period,
+                )
+            )
+            or 0
+        )
+    )
+
+    # 异常口径与异常中心保持一致（分成异常/未匹配渠道/未匹配游戏/导入失败/超期未结算）
+    share_exception_count = int(
+        db.scalar(
+            select(func.count(ChannelGameMap.id)).where(
+                ((ChannelGameMap.revenue_share_ratio + ChannelGameMap.rd_settlement_ratio) > Decimal("1.0001"))
+                | ((ChannelGameMap.revenue_share_ratio + ChannelGameMap.rd_settlement_ratio) < Decimal("0.9999"))
+            )
+        )
+        or 0
+    )
+    cutoff_dt = dt.datetime.combine(today - dt.timedelta(days=days - 1), dt.time.min)
+    channels = {x.name for x in db.scalars(select(Channel.name)).all()}
+    active_variants = {x.raw_game_name for x in db.scalars(select(GameVariant.raw_game_name).where(GameVariant.status == VariantStatus.active)).all()}
+    recent_raw_rows = db.scalars(select(RawStatement).where(RawStatement.created_at >= cutoff_dt)).all()
+    unmatched_channel_count = sum(1 for row in recent_raw_rows if row.channel_name not in channels)
+    unmatched_game_count = sum(1 for row in recent_raw_rows if row.game_name not in active_variants)
+    import_failed_count = int(
+        db.scalar(
+            select(func.count(ImportHistory.id)).where(
+                ImportHistory.created_at >= cutoff_dt,
+                (ImportHistory.invalid_count > 0) | (ImportHistory.status.like("%失败%")),
+            )
+        )
+        or 0
+    )
+    overdue_unsettled_count = int(
+        db.scalar(
+            select(func.count(Bill.id)).where(
+                Bill.collection_status != CollectionStatus.paid,
+                Bill.period < current_period,
+            )
+        )
+        or 0
+    )
+    exception_bill_count = share_exception_count + unmatched_channel_count + unmatched_game_count + import_failed_count + overdue_unsettled_count
+
+    prev_month_cutoff = dt.datetime.combine(prev_month_start, dt.time.min)
+    prev_month_next = dt.datetime.combine(month_start, dt.time.min)
+    prev_month_raw_rows = db.scalars(
+        select(RawStatement).where(RawStatement.created_at >= prev_month_cutoff, RawStatement.created_at < prev_month_next)
+    ).all()
+    prev_month_unmatched_channel = sum(1 for row in prev_month_raw_rows if row.channel_name not in channels)
+    prev_month_unmatched_game = sum(1 for row in prev_month_raw_rows if row.game_name not in active_variants)
+    prev_month_import_failed = int(
+        db.scalar(
+            select(func.count(ImportHistory.id)).where(
+                ImportHistory.created_at >= prev_month_cutoff,
+                ImportHistory.created_at < prev_month_next,
+                (ImportHistory.invalid_count > 0) | (ImportHistory.status.like("%失败%")),
+            )
+        )
+        or 0
+    )
+    prev_month_overdue = int(
+        db.scalar(
+            select(func.count(Bill.id)).where(
+                Bill.collection_status != CollectionStatus.paid,
+                Bill.period == prev_period,
+            )
+        )
+        or 0
+    )
+    previous_exception_bill_count = share_exception_count + prev_month_unmatched_channel + prev_month_unmatched_game + prev_month_import_failed + prev_month_overdue
+
+    start_day = today - dt.timedelta(days=days - 1)
+    date_keys = [(start_day + dt.timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days)]
+    flow_map: dict[str, Decimal] = {d: Decimal("0") for d in date_keys}
+    receipt_map: dict[str, Decimal] = {d: Decimal("0") for d in date_keys}
+    rd_map: dict[str, Decimal] = {d: Decimal("0") for d in date_keys}
+
+    flow_rows = db.execute(
+        select(func.date(RawStatement.created_at).label("d"), func.coalesce(func.sum(RawStatement.gross_amount), 0).label("s"))
+        .where(RawStatement.created_at >= cutoff_dt)
+        .group_by(func.date(RawStatement.created_at))
+    ).all()
+    for d, s in flow_rows:
+        key = str(d)
+        if key in flow_map:
+            flow_map[key] = Decimal(str(s or 0))
+
+    receipt_rows = db.execute(
+        select(func.date(Receipt.received_at).label("d"), func.coalesce(func.sum(Receipt.amount), 0).label("s"))
+        .where(Receipt.received_at >= start_day)
+        .group_by(func.date(Receipt.received_at))
+    ).all()
+    for d, s in receipt_rows:
+        key = str(d)
+        if key in receipt_map:
+            receipt_map[key] = Decimal(str(s or 0))
+
+    rd_rows = db.execute(
+        select(func.date(Bill.created_at).label("d"), func.coalesce(func.sum(Bill.amount), 0).label("s"))
+        .where(Bill.bill_type == BillType.rd, Bill.created_at >= cutoff_dt)
+        .group_by(func.date(Bill.created_at))
+    ).all()
+    for d, s in rd_rows:
+        key = str(d)
+        if key in rd_map:
+            rd_map[key] = Decimal(str(s or 0))
+
+    trends: list[dict] = []
+    for d in date_keys:
+        flow_amount = flow_map[d]
+        receipt_amount = receipt_map[d]
+        profit_amount = receipt_amount - rd_map[d]
+        trends.append({"date": d, "type": "流水", "amount": flow_amount})
+        trends.append({"date": d, "type": "回款", "amount": receipt_amount})
+        trends.append({"date": d, "type": "利润", "amount": profit_amount})
+
+    recent_logs = db.scalars(select(SystemAuditLog).order_by(SystemAuditLog.id.desc()).limit(10)).all()
+    recent_activities = [
+        {
+            "id": x.id,
+            "operator": x.operator,
+            "action_type": x.action,
+            "detail": x.summary,
+            "created_at": x.created_at,
+        }
+        for x in recent_logs
+    ]
+
+    return {
+        "summary": {
+            "monthly_gross_revenue": monthly_gross_revenue,
+            "monthly_channel_receipts": monthly_channel_receipts,
+            "monthly_rd_payable": monthly_rd_payable,
+            "monthly_gross_profit": monthly_gross_profit,
+            "unsettled_amount": unsettled_amount,
+            "exception_bill_count": exception_bill_count,
+        },
+        "summary_compare": {
+            "monthly_gross_revenue": _safe_ratio_change(monthly_gross_revenue, previous_month_gross_revenue),
+            "monthly_channel_receipts": _safe_ratio_change(monthly_channel_receipts, previous_month_channel_receipts),
+            "monthly_rd_payable": _safe_ratio_change(monthly_rd_payable, previous_month_rd_payable),
+            "monthly_gross_profit": _safe_ratio_change(monthly_gross_profit, previous_month_gross_profit),
+            "unsettled_amount": _safe_ratio_change(unsettled_amount, previous_unsettled_amount),
+            "exception_bill_count": _safe_ratio_change(Decimal(str(exception_bill_count)), Decimal(str(previous_exception_bill_count))),
+        },
+        "trends": trends,
+        "exceptions": {
+            "total": exception_bill_count,
+            "share": share_exception_count,
+            "channel": unmatched_channel_count,
+            "game": unmatched_game_count,
+            "import": import_failed_count,
+            "overdue": overdue_unsettled_count,
+        },
+        "recent_activities": recent_activities,
+    }
+
+
 @app.get("/audit/logs")
 def list_system_audit_logs(
     operator: Optional[str] = None,
