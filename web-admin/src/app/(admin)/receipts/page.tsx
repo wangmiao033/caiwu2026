@@ -15,6 +15,7 @@ type ReceiptRow = {
   status?: string;
   target_name?: string;
   period?: string;
+  outstanding_amount?: number;
   remark?: string;
   created_at?: string;
 };
@@ -75,7 +76,9 @@ export default function ReceiptsPage() {
         回款ID: x.id,
         关联账单: x.bill_id,
         目标对象: x.target_name || "",
+        账期: x.period || "",
         金额: x.amount,
+        未回款金额: x.outstanding_amount ?? "",
         回款日期: x.received_at,
         状态: x.status || "",
         备注: x.remark || "",
@@ -150,6 +153,7 @@ export default function ReceiptsPage() {
             { title: "账期", dataIndex: "period" },
             { title: "回款日期", dataIndex: "received_at" },
             { title: "金额", dataIndex: "amount" },
+            { title: "未回款金额", dataIndex: "outstanding_amount", render: (v: number) => v ?? "-" },
             { title: "流水号", dataIndex: "bank_ref" },
             { title: "收款账户", dataIndex: "account_name" },
             {

@@ -1056,7 +1056,7 @@ def generate_bills(
     return {"created_bills": created}
 
 
-@app.get("/billing/bills", response_model=list[BillOut])
+@app.get("/billing/bills")
 def list_bills(
     period: Optional[str] = None,
     bill_type: Optional[BillType] = None,
@@ -1068,7 +1068,90 @@ def list_bills(
         stmt = stmt.where(Bill.period == period)
     if bill_type:
         stmt = stmt.where(Bill.bill_type == bill_type)
-    return db.scalars(stmt).all()
+    rows = db.scalars(stmt).all()
+    result = []
+    for b in rows:
+        invoices = db.scalars(select(Invoice).where(Invoice.bill_id == b.id).order_by(Invoice.id.desc())).all()
+        receipts = db.scalars(select(Receipt).where(Receipt.bill_id == b.id).order_by(Receipt.id.desc())).all()
+        invoiced_total = sum((Decimal(str(x.total_amount)) for x in invoices), Decimal("0"))
+        received_total = sum((Decimal(str(x.amount)) for x in receipts), Decimal("0"))
+        outstanding_amount = max(Decimal("0"), Decimal(str(b.amount)) - received_total)
+        invoice_status = "已开票" if invoices else "待开票"
+        receipt_status = "待回款"
+        if received_total >= Decimal(str(b.amount)):
+            receipt_status = "已回款"
+        elif received_total > 0:
+            receipt_status = "部分回款"
+        result.append(
+            {
+                "id": b.id,
+                "bill_type": b.bill_type,
+                "period": b.period,
+                "target_name": b.target_name,
+                "amount": b.amount,
+                "status": b.status,
+                "version": b.version,
+                "collection_status": b.collection_status,
+                "invoice_status": invoice_status,
+                "receipt_status": receipt_status,
+                "invoiced_total": invoiced_total,
+                "received_total": received_total,
+                "outstanding_amount": outstanding_amount,
+                "latest_receipt_date": str(receipts[0].received_at) if receipts else "",
+            }
+        )
+    return result
+
+
+@app.get("/billing/{bill_id}")
+def get_bill_detail(
+    bill_id: int,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops])),
+):
+    b = db.get(Bill, bill_id)
+    if not b:
+        raise HTTPException(status_code=404, detail="账单不存在")
+    invoices = db.scalars(select(Invoice).where(Invoice.bill_id == b.id).order_by(Invoice.id.desc())).all()
+    receipts = db.scalars(select(Receipt).where(Receipt.bill_id == b.id).order_by(Receipt.id.desc())).all()
+    invoiced_total = sum((Decimal(str(x.total_amount)) for x in invoices), Decimal("0"))
+    received_total = sum((Decimal(str(x.amount)) for x in receipts), Decimal("0"))
+    outstanding_amount = max(Decimal("0"), Decimal(str(b.amount)) - received_total)
+    latest_invoice = invoices[0] if invoices else None
+    latest_receipt = receipts[0] if receipts else None
+    invoice_status = "已开票" if invoices else "待开票"
+    receipt_status = "待回款"
+    if received_total >= Decimal(str(b.amount)):
+        receipt_status = "已回款"
+    elif received_total > 0:
+        receipt_status = "部分回款"
+    return {
+        "id": b.id,
+        "bill_type": b.bill_type,
+        "period": b.period,
+        "target_name": b.target_name,
+        "amount": b.amount,
+        "status": b.status,
+        "version": b.version,
+        "collection_status": b.collection_status,
+        "invoice_status": invoice_status,
+        "receipt_status": receipt_status,
+        "invoiced_total": invoiced_total,
+        "received_total": received_total,
+        "outstanding_amount": outstanding_amount,
+        "invoice_info": {
+            "has_invoice": bool(invoices),
+            "invoice_no": latest_invoice.invoice_no if latest_invoice else "",
+            "invoice_amount": latest_invoice.total_amount if latest_invoice else Decimal("0"),
+            "issue_date": str(latest_invoice.issue_date) if latest_invoice else "",
+        },
+        "receipt_info": {
+            "received_total": received_total,
+            "outstanding_amount": outstanding_amount,
+            "latest_receipt_date": str(latest_receipt.received_at) if latest_receipt else "",
+            "receipt_status": receipt_status,
+        },
+    }
 
 
 @app.post("/billing/{bill_id}/send")
@@ -1199,6 +1282,8 @@ def list_receipts(
     for x in rows:
         bill = db.get(Bill, x.bill_id)
         meta = db.scalar(select(ReceiptMeta).where(ReceiptMeta.receipt_id == x.id))
+        bill_total = Decimal(str(bill.amount)) if bill else Decimal("0")
+        received_total = db.scalar(select(func.coalesce(func.sum(Receipt.amount), 0)).where(Receipt.bill_id == x.bill_id)) if bill else Decimal("0")
         item = {
             "id": x.id,
             "bill_id": x.bill_id,
@@ -1209,6 +1294,7 @@ def list_receipts(
             "target_name": bill.target_name if bill else "",
             "period": bill.period if bill else "",
             "status": bill.collection_status if bill else "",
+            "outstanding_amount": max(Decimal("0"), bill_total - Decimal(str(received_total))),
             "remark": meta.remark if meta else "",
             "created_at": str(meta.created_at if meta else x.received_at),
         }
@@ -1317,14 +1403,62 @@ def get_import_history_issues(history_id: int, db: Session = Depends(get_db), _:
 def finance_dashboard(db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz]))):
     total_receivable = db.scalar(select(func.coalesce(func.sum(Bill.amount), 0)))
     total_received = db.scalar(select(func.coalesce(func.sum(Receipt.amount), 0)))
+    total_invoiced = db.scalar(select(func.coalesce(func.sum(Invoice.total_amount), 0)))
     pending_count = db.scalar(select(func.count(Bill.id)).where(Bill.collection_status == CollectionStatus.pending))
     partial_count = db.scalar(select(func.count(Bill.id)).where(Bill.collection_status == CollectionStatus.partial))
     paid_count = db.scalar(select(func.count(Bill.id)).where(Bill.collection_status == CollectionStatus.paid))
+    outstanding = Decimal(str(total_receivable)) - Decimal(str(total_received))
+    current_period = dt.date.today().strftime("%Y-%m")
+    overdue_amount = db.scalar(
+        select(func.coalesce(func.sum(Bill.amount), 0)).where(Bill.collection_status != CollectionStatus.paid, Bill.period < current_period)
+    )
+    recent_period_rows = db.scalars(select(Bill).order_by(Bill.period.desc(), Bill.id.desc()).limit(300)).all()
+    period_map: dict[str, dict[str, Decimal]] = {}
+    for b in recent_period_rows:
+        if b.period not in period_map:
+            period_map[b.period] = {"receivable": Decimal("0"), "received": Decimal("0"), "count": Decimal("0")}
+        period_map[b.period]["receivable"] += Decimal(str(b.amount))
+        period_map[b.period]["count"] += Decimal("1")
+        rec_sum = db.scalar(select(func.coalesce(func.sum(Receipt.amount), 0)).where(Receipt.bill_id == b.id))
+        period_map[b.period]["received"] += Decimal(str(rec_sum))
+    recent_period_summary = []
+    for period_key in sorted(period_map.keys(), reverse=True)[:6]:
+        item = period_map[period_key]
+        recent_period_summary.append(
+            {
+                "period": period_key,
+                "bill_count": int(item["count"]),
+                "receivable": item["receivable"],
+                "received": item["received"],
+                "outstanding": max(Decimal("0"), item["receivable"] - item["received"]),
+            }
+        )
+    pending_bills = db.scalars(select(Bill).where(Bill.collection_status != CollectionStatus.paid).order_by(Bill.id.desc()).limit(20)).all()
+    pending_list = []
+    for b in pending_bills:
+        rec_sum = db.scalar(select(func.coalesce(func.sum(Receipt.amount), 0)).where(Receipt.bill_id == b.id))
+        rec_total = Decimal(str(rec_sum))
+        pending_list.append(
+            {
+                "bill_id": b.id,
+                "period": b.period,
+                "target_name": b.target_name,
+                "bill_type": b.bill_type,
+                "amount": b.amount,
+                "received_total": rec_total,
+                "outstanding_amount": max(Decimal("0"), Decimal(str(b.amount)) - rec_total),
+                "receipt_status": "部分回款" if rec_total > 0 else "待回款",
+            }
+        )
     return {
         "total_receivable": total_receivable,
+        "total_invoiced": total_invoiced,
         "total_received": total_received,
-        "outstanding": Decimal(str(total_receivable)) - Decimal(str(total_received)),
+        "outstanding": outstanding,
+        "overdue_amount": overdue_amount,
         "status_breakdown": {"待回款": pending_count, "部分回款": partial_count, "已回款": paid_count},
+        "recent_period_summary": recent_period_summary,
+        "pending_bills": pending_list,
     }
 
 

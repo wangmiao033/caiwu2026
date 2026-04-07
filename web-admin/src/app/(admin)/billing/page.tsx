@@ -15,6 +15,11 @@ type BillRow = {
   status: string;
   version: number;
   collection_status: string;
+  invoice_status?: string;
+  receipt_status?: string;
+  received_total?: number;
+  outstanding_amount?: number;
+  latest_receipt_date?: string;
   gross_amount?: number;
   channel_fee?: number;
   tax_rate?: number;
@@ -24,13 +29,29 @@ type BillRow = {
   profit?: number;
 };
 
+type BillDetail = BillRow & {
+  invoiced_total?: number;
+  invoice_info?: {
+    has_invoice: boolean;
+    invoice_no: string;
+    invoice_amount: number;
+    issue_date: string;
+  };
+  receipt_info?: {
+    received_total: number;
+    outstanding_amount: number;
+    latest_receipt_date: string;
+    receipt_status: string;
+  };
+};
+
 export default function BillingPage() {
   const [period, setPeriod] = useState("2026-03");
   const [list, setList] = useState<BillRow[]>([]);
   const [filterType, setFilterType] = useState<string>("");
   const [filterText, setFilterText] = useState("");
   const [sendingId, setSendingId] = useState<number | null>(null);
-  const [detail, setDetail] = useState<BillRow | null>(null);
+  const [detail, setDetail] = useState<BillDetail | null>(null);
   const [showTrial, setShowTrial] = useState(false);
   const [rules, setRules] = useState<BillingRule[]>([]);
   const [exportFormat, setExportFormat] = useState<"xlsx" | "csv">("xlsx");
@@ -86,6 +107,14 @@ export default function BillingPage() {
         }
       },
     });
+  };
+  const openDetail = async (id: number) => {
+    try {
+      const data = await apiRequest<BillDetail>(`/billing/${id}`);
+      setDetail(data);
+    } catch (e) {
+      message.error((e as Error).message);
+    }
   };
 
   const filtered = useMemo(
@@ -194,6 +223,7 @@ export default function BillingPage() {
             { title: "研发分成(预留)", dataIndex: "rd_share", render: (v: number) => v ?? "-" },
             { title: "私点(预留)", dataIndex: "private_rate", render: (v: number) => v ?? "-" },
             { title: "金额", dataIndex: "amount" },
+            { title: "开票状态", dataIndex: "invoice_status", render: (v: string) => <Tag color={v === "已开票" ? "green" : "orange"}>{v || "-"}</Tag> },
             { title: "结算金额(预留)", dataIndex: "settlement_amount", render: (v: number) => v ?? "-" },
             { title: "利润(预留)", dataIndex: "profit", render: (v: number) => v ?? "-" },
             ...(showTrial
@@ -218,12 +248,14 @@ export default function BillingPage() {
               dataIndex: "status",
               render: (v: string) => <Tag color={v === "有异议" ? "red" : v === "对方确认" ? "green" : "blue"}>{v}</Tag>,
             },
-            { title: "回款状态", dataIndex: "collection_status" },
+            { title: "回款状态", dataIndex: "receipt_status", render: (v: string) => <Tag color={v === "已回款" ? "green" : v === "部分回款" ? "gold" : "blue"}>{v || "-"}</Tag> },
+            { title: "已回款金额", dataIndex: "received_total", render: (v: number) => v ?? 0 },
+            { title: "未回款金额", dataIndex: "outstanding_amount", render: (v: number) => v ?? 0 },
             {
               title: "操作",
               render: (_, r) => (
                 <Space>
-                  <Button size="small" onClick={() => setDetail(r)}>
+                  <Button size="small" onClick={() => openDetail(r.id)}>
                     详情
                   </Button>
                   <Button size="small" loading={sendingId === r.id} onClick={() => sendBill(r.id, "已发送")}>
@@ -247,6 +279,8 @@ export default function BillingPage() {
               <Descriptions.Item label="对象">{detail.target_name}</Descriptions.Item>
               <Descriptions.Item label="金额">{detail.amount}</Descriptions.Item>
               <Descriptions.Item label="状态">{detail.status}</Descriptions.Item>
+              <Descriptions.Item label="开票状态">{detail.invoice_status || "-"}</Descriptions.Item>
+              <Descriptions.Item label="回款状态">{detail.receipt_status || detail.collection_status || "-"}</Descriptions.Item>
               <Descriptions.Item label="规则来源说明">
                 当前账单规则来自系统“规则配置”页（游戏+渠道维度）。<br />
                 折扣/通道费/税点/研发分成/私点将作为自动计算依据。<br />
@@ -266,6 +300,22 @@ export default function BillingPage() {
                 <Descriptions.Item label="公式说明">
                   折扣后流水=原流水*折扣系数；通道费金额=折扣后流水*通道费比例；税额=折扣后流水*税点比例；研发分成金额=折扣后流水*研发分成比例；私点金额=折扣后流水*私点比例；试算结算金额=折扣后流水-通道费金额-税额-研发分成金额-私点金额；试算利润=试算结算金额。
                 </Descriptions.Item>
+              </Descriptions>
+            </Card>
+            <Card size="small" title="关联发票信息">
+              <Descriptions column={1} bordered size="small">
+                <Descriptions.Item label="是否已开票">{detail.invoice_info?.has_invoice ? "是" : "否"}</Descriptions.Item>
+                <Descriptions.Item label="发票编号">{detail.invoice_info?.invoice_no || "-"}</Descriptions.Item>
+                <Descriptions.Item label="发票金额">{detail.invoice_info?.invoice_amount ?? 0}</Descriptions.Item>
+                <Descriptions.Item label="开票日期">{detail.invoice_info?.issue_date || "-"}</Descriptions.Item>
+              </Descriptions>
+            </Card>
+            <Card size="small" title="关联回款信息">
+              <Descriptions column={1} bordered size="small">
+                <Descriptions.Item label="已回款金额">{detail.receipt_info?.received_total ?? detail.received_total ?? 0}</Descriptions.Item>
+                <Descriptions.Item label="未回款金额">{detail.receipt_info?.outstanding_amount ?? detail.outstanding_amount ?? 0}</Descriptions.Item>
+                <Descriptions.Item label="最近回款日期">{detail.receipt_info?.latest_receipt_date || detail.latest_receipt_date || "-"}</Descriptions.Item>
+                <Descriptions.Item label="回款状态">{detail.receipt_info?.receipt_status || detail.receipt_status || "-"}</Descriptions.Item>
               </Descriptions>
             </Card>
           </Space>
