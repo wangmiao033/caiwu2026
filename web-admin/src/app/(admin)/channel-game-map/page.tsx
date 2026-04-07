@@ -30,6 +30,10 @@ export default function ChannelGameMapPage() {
   const [bulkPreview, setBulkPreview] = useState<BulkPreviewRow[]>([]);
   const [bulkLoading, setBulkLoading] = useState(false);
   const [form] = Form.useForm();
+  const toPercent = (ratio: number) => Number((ratio * 100).toFixed(2));
+  const toRatio = (percent: number) => Number((percent / 100).toFixed(4));
+  const calcPublishRatio = (channelRatio: number, rdRatio: number) => Number((1 - channelRatio - rdRatio).toFixed(4));
+  const isTotalValid = (channelRatio: number, rdRatio: number, publishRatio: number) => Math.abs(channelRatio + rdRatio + publishRatio - 1) < 0.0001;
 
   const loadMeta = async () => {
     const [c, g] = await Promise.all([apiRequest<Channel[]>("/channels"), apiRequest<Game[]>("/games")]);
@@ -47,11 +51,22 @@ export default function ChannelGameMapPage() {
 
   const submit = async () => {
     const values = await form.validateFields();
+    const channelPercent = Number(values.revenue_share_ratio || 0);
+    const rdPercent = Number(values.rd_settlement_ratio || 0);
+    if (channelPercent + rdPercent > 100) {
+      message.error("渠道分成与研发分成之和不能大于100%");
+      return;
+    }
+    const payload = {
+      ...values,
+      revenue_share_ratio: toRatio(channelPercent),
+      rd_settlement_ratio: toRatio(rdPercent),
+    };
     try {
       if (editing) {
-        await apiRequest(`/channel-game-map/${editing.id}`, "PUT", values);
+        await apiRequest(`/channel-game-map/${editing.id}`, "PUT", payload);
       } else {
-        await apiRequest("/channel-game-map", "POST", values);
+        await apiRequest("/channel-game-map", "POST", payload);
       }
       setOpen(false);
       setEditing(null);
@@ -85,8 +100,9 @@ export default function ChannelGameMapPage() {
         映射ID: x.id,
         渠道: x.channel,
         游戏: x.game,
-        渠道分成: x.revenue_share_ratio,
-        研发分成: x.rd_settlement_ratio,
+        渠道分成: `${toPercent(x.revenue_share_ratio)}%`,
+        研发分成: `${toPercent(x.rd_settlement_ratio)}%`,
+        发行分成: `${toPercent(calcPublishRatio(x.revenue_share_ratio, x.rd_settlement_ratio))}%`,
       })),
       buildExportFilename("channel_game_map", "xlsx")
     );
@@ -171,6 +187,16 @@ export default function ChannelGameMapPage() {
   useEffect(() => {
     load();
   }, []);
+  const channelSharePercent = Form.useWatch("revenue_share_ratio", form) as number | undefined;
+  const rdSharePercent = Form.useWatch("rd_settlement_ratio", form) as number | undefined;
+  const publishSharePercent =
+    typeof channelSharePercent === "number" && typeof rdSharePercent === "number"
+      ? Number((100 - channelSharePercent - rdSharePercent).toFixed(2))
+      : undefined;
+  const totalPercent =
+    typeof channelSharePercent === "number" && typeof rdSharePercent === "number" && typeof publishSharePercent === "number"
+      ? Number((channelSharePercent + rdSharePercent + publishSharePercent).toFixed(2))
+      : undefined;
 
   return (
     <Card
@@ -219,8 +245,24 @@ export default function ChannelGameMapPage() {
           { title: "ID", dataIndex: "id", width: 90 },
           { title: "渠道", dataIndex: "channel" },
           { title: "游戏", dataIndex: "game" },
-          { title: "渠道分成", dataIndex: "revenue_share_ratio" },
-          { title: "研发分成", dataIndex: "rd_settlement_ratio" },
+          { title: "渠道分成", dataIndex: "revenue_share_ratio", render: (v: number) => `${toPercent(v)}%` },
+          { title: "研发分成", dataIndex: "rd_settlement_ratio", render: (v: number) => `${toPercent(v)}%` },
+          { title: "发行分成", render: (_, r) => `${toPercent(calcPublishRatio(r.revenue_share_ratio, r.rd_settlement_ratio))}%` },
+          {
+            title: "合计",
+            render: (_, r) => {
+              const publishRatio = calcPublishRatio(r.revenue_share_ratio, r.rd_settlement_ratio);
+              return `${toPercent(r.revenue_share_ratio + r.rd_settlement_ratio + publishRatio)}%`;
+            },
+          },
+          {
+            title: "校验状态",
+            render: (_, r) => {
+              const publishRatio = calcPublishRatio(r.revenue_share_ratio, r.rd_settlement_ratio);
+              const ok = isTotalValid(r.revenue_share_ratio, r.rd_settlement_ratio, publishRatio);
+              return <Tag color={ok ? "green" : "red"}>{ok ? "正常" : "异常"}</Tag>;
+            },
+          },
           {
             title: "操作",
             render: (_, r) => (
@@ -235,8 +277,8 @@ export default function ChannelGameMapPage() {
                     form.setFieldsValue({
                       channel_id: channel.id,
                       game_id: game.id,
-                      revenue_share_ratio: r.revenue_share_ratio,
-                      rd_settlement_ratio: r.rd_settlement_ratio,
+                      revenue_share_ratio: toPercent(r.revenue_share_ratio),
+                      rd_settlement_ratio: toPercent(r.rd_settlement_ratio),
                     });
                     setOpen(true);
                   }}
@@ -259,11 +301,17 @@ export default function ChannelGameMapPage() {
           <Form.Item name="game_id" label="游戏" rules={[{ required: true }]}>
             <Select options={games.map((x) => ({ label: x.name, value: x.id }))} />
           </Form.Item>
-          <Form.Item name="revenue_share_ratio" label="渠道分成" rules={[{ required: true }]}>
-            <InputNumber min={0} max={1} step={0.01} style={{ width: "100%" }} />
+          <Form.Item name="revenue_share_ratio" label="渠道分成(%)" rules={[{ required: true }]}>
+            <InputNumber min={0} max={100} step={0.01} style={{ width: "100%" }} />
           </Form.Item>
-          <Form.Item name="rd_settlement_ratio" label="研发分成" rules={[{ required: true }]}>
-            <InputNumber min={0} max={1} step={0.01} style={{ width: "100%" }} />
+          <Form.Item name="rd_settlement_ratio" label="研发分成(%)" rules={[{ required: true }]}>
+            <InputNumber min={0} max={100} step={0.01} style={{ width: "100%" }} />
+          </Form.Item>
+          <Form.Item label="发行分成(%)">
+            <InputNumber value={publishSharePercent} disabled style={{ width: "100%" }} />
+          </Form.Item>
+          <Form.Item label="合计(%)">
+            <InputNumber value={totalPercent} disabled style={{ width: "100%" }} />
           </Form.Item>
         </Form>
       </Modal>
