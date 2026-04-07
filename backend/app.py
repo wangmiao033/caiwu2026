@@ -2056,6 +2056,63 @@ def get_import_history_unmatched_variants(
     ]
 
 
+@app.post("/imports/history/{history_id}/rematch-variants")
+def rematch_import_history_variants(
+    history_id: int,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance, Role.ops, Role.biz])),
+):
+    history = db.get(ImportHistory, history_id)
+    if not history:
+        raise HTTPException(status_code=404, detail="导入历史不存在")
+    variants = {x.raw_game_name: x for x in db.scalars(select(GameVariant)).all()}
+    projects = {x.id: x for x in db.scalars(select(Project)).all()}
+    rows = db.scalars(select(RawStatement).where(RawStatement.recon_task_id == history.task_id)).all()
+    rematched_count = 0
+    matched_count = 0
+    unmatched_count = 0
+    for row in rows:
+        matched_variant = variants.get(row.game_name)
+        matched_project = projects.get(matched_variant.project_id) if matched_variant else None
+        prev_unmatched = row.variant_match_status == "未匹配版本"
+        if matched_variant:
+            row.project_id = matched_project.id if matched_project else None
+            row.project_name = matched_project.name if matched_project else None
+            row.variant_id = matched_variant.id
+            row.variant_name = matched_variant.variant_name
+            row.rd_company = matched_variant.rd_company
+            row.publish_company = matched_variant.publish_company
+            row.rd_share_percent = matched_variant.rd_share_percent
+            row.publish_share_percent = matched_variant.publish_share_percent
+            row.variant_match_status = "已匹配版本"
+            matched_count += 1
+            if prev_unmatched:
+                rematched_count += 1
+        else:
+            row.project_id = None
+            row.project_name = None
+            row.variant_id = None
+            row.variant_name = None
+            row.rd_company = None
+            row.publish_company = None
+            row.rd_share_percent = None
+            row.publish_share_percent = None
+            row.variant_match_status = "未匹配版本"
+            unmatched_count += 1
+    history.matched_variant_count = matched_count
+    history.unmatched_variant_count = unmatched_count
+    write_system_audit(
+        db,
+        ctx["user"],
+        "rematch_variants_for_import_history",
+        "import_history",
+        str(history.id),
+        f"重新匹配版本: rematched={rematched_count}, remaining_unmatched={unmatched_count}",
+    )
+    db.commit()
+    return {"rematched_count": rematched_count, "remaining_unmatched_count": unmatched_count}
+
+
 @app.get("/dashboard/finance")
 def finance_dashboard(db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz]))):
     total_receivable = db.scalar(select(func.coalesce(func.sum(Bill.amount), 0)))

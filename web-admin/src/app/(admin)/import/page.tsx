@@ -429,6 +429,33 @@ export default function ImportPage() {
     }
   };
 
+  const rematchHistoryVariants = async () => {
+    if (!historyDetail) return;
+    Modal.confirm({
+      title: "确认重新匹配版本",
+      content: "将对该次导入历史执行版本重新匹配并回填，是否继续？",
+      onOk: async () => {
+        const hide = message.loading("正在重新匹配版本...", 0);
+        try {
+          const resp = await apiRequest<{ rematched_count: number; remaining_unmatched_count: number }>(
+            `/imports/history/${historyDetail.id}/rematch-variants`,
+            "POST"
+          );
+          await Promise.all([loadHistoryDetail(historyDetail.id), loadHistoryUnmatched(historyDetail.id), loadHistory(historyPage), refreshVariantInfoMap()]);
+          if (resp.remaining_unmatched_count === 0) {
+            message.success("已全部匹配完成");
+          } else {
+            message.warning(`已重新匹配 ${resp.rematched_count} 条，仍有 ${resp.remaining_unmatched_count} 条未匹配，请继续补充版本`);
+          }
+        } catch (e) {
+          message.error((e as Error).message);
+        } finally {
+          hide();
+        }
+      },
+    });
+  };
+
   const openResolveModal = (ids: number[]) => {
     if (!ids.length) {
       message.warning("请先选择要处理的异常");
@@ -1091,6 +1118,11 @@ export default function ImportPage() {
                 { title: "值", dataIndex: "v" },
               ]}
             />
+            <Space>
+              <Button type="primary" onClick={rematchHistoryVariants}>
+                重新匹配版本
+              </Button>
+            </Space>
             {(historyDetail.unmatched_variant_count ?? 0) > 0 && <Tag color="orange">部分数据未匹配到版本，后续统计可能不完整</Tag>}
             {(historyDetail.unmatched_variant_count ?? 0) > 0 && (
               <Card size="small" title="未匹配版本列表" loading={unmatchedLoading}>
