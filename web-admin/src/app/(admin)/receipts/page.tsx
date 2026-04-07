@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Button, Card, Form, Input, InputNumber, Select, Space, Table, Tag, message } from "antd";
+import { Button, Card, Form, Input, InputNumber, Modal, Select, Space, Table, Tag, message } from "antd";
 import { apiRequest } from "@/lib/api";
 import { exportRowsToXlsx } from "@/lib/export";
 
@@ -25,6 +25,9 @@ export default function ReceiptsPage() {
   const [status, setStatus] = useState("");
   const [period, setPeriod] = useState("");
   const [keyword, setKeyword] = useState("");
+  const [openEdit, setOpenEdit] = useState(false);
+  const [editing, setEditing] = useState<ReceiptRow | null>(null);
+  const [editForm] = Form.useForm();
 
   const load = async () => {
     try {
@@ -48,6 +51,18 @@ export default function ReceiptsPage() {
       const result = await apiRequest<{ collection_status: string; receipt_id: number }>("/receipts", "POST", values);
       message.success("回款登记成功");
       form.resetFields();
+      await load();
+    } catch (e) {
+      message.error((e as Error).message);
+    }
+  };
+  const update = async () => {
+    const values = await editForm.validateFields();
+    if (!editing) return;
+    try {
+      await apiRequest(`/receipts/${editing.id}`, "PUT", values);
+      message.success("编辑成功");
+      setOpenEdit(false);
       await load();
     } catch (e) {
       message.error((e as Error).message);
@@ -123,9 +138,45 @@ export default function ReceiptsPage() {
               dataIndex: "status",
               render: (v: string) => <Tag color={v === "已回款" ? "green" : v === "部分回款" ? "gold" : "blue"}>{v || "-"}</Tag>,
             },
+            {
+              title: "操作",
+              render: (_, r) => (
+                <Button
+                  size="small"
+                  onClick={() => {
+                    setEditing(r);
+                    editForm.setFieldsValue({
+                      bill_id: r.bill_id,
+                      received_at: r.received_at,
+                      amount: r.amount,
+                      bank_ref: r.bank_ref,
+                      account_name: r.account_name,
+                      status: r.status,
+                      remark: r.remark || "",
+                    });
+                    setOpenEdit(true);
+                  }}
+                >
+                  编辑
+                </Button>
+              ),
+            },
           ]}
         />
       </Card>
+      <Modal open={openEdit} title={`编辑回款 #${editing?.id || ""}`} onCancel={() => setOpenEdit(false)} onOk={update}>
+        <Form form={editForm} layout="vertical">
+          <Form.Item label="账单ID" name="bill_id" rules={[{ required: true }]}><InputNumber style={{ width: "100%" }} /></Form.Item>
+          <Form.Item label="回款日期" name="received_at" rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item label="金额" name="amount" rules={[{ required: true }]}><InputNumber style={{ width: "100%" }} /></Form.Item>
+          <Form.Item label="流水号" name="bank_ref" rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item label="收款账户" name="account_name" rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item label="状态" name="status" rules={[{ required: true }]}>
+            <Select options={[{ label: "待回款", value: "待回款" }, { label: "部分回款", value: "部分回款" }, { label: "已回款", value: "已回款" }]} />
+          </Form.Item>
+          <Form.Item label="备注" name="remark"><Input /></Form.Item>
+        </Form>
+      </Modal>
     </Space>
   );
 }

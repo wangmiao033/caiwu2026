@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Button, Card, Form, Input, InputNumber, Select, Space, Table, Tag, message } from "antd";
+import { Button, Card, Form, Input, InputNumber, Modal, Select, Space, Table, Tag, message } from "antd";
 import { apiRequest } from "@/lib/api";
 import { exportRowsToXlsx } from "@/lib/export";
 
@@ -23,7 +23,10 @@ export default function InvoicesPage() {
   const [status, setStatus] = useState("");
   const [period, setPeriod] = useState("");
   const [keyword, setKeyword] = useState("");
+  const [openEdit, setOpenEdit] = useState(false);
+  const [editing, setEditing] = useState<InvoiceRow | null>(null);
   const [form] = Form.useForm();
+  const [editForm] = Form.useForm();
 
   const load = async () => {
     try {
@@ -44,6 +47,27 @@ export default function InvoicesPage() {
       await apiRequest("/invoices", "POST", values);
       message.success("开票成功");
       form.resetFields();
+      await load();
+    } catch (e) {
+      message.error((e as Error).message);
+    }
+  };
+  const update = async () => {
+    const values = await editForm.validateFields();
+    if (!editing) return;
+    try {
+      await apiRequest(`/invoices/${editing.id}`, "PUT", {
+        invoice_no: values.invoice_no,
+        bill_id: values.bill_id,
+        issue_date: values.issue_date,
+        amount_without_tax: values.amount_without_tax,
+        tax_amount: values.tax_amount,
+        total_amount: values.total_amount,
+        status: values.status,
+        remark: values.remark || "",
+      });
+      message.success("编辑成功");
+      setOpenEdit(false);
       await load();
     } catch (e) {
       message.error((e as Error).message);
@@ -117,9 +141,47 @@ export default function InvoicesPage() {
             { title: "开票日期", dataIndex: "issue_date" },
             { title: "金额", dataIndex: "total_amount" },
             { title: "状态", dataIndex: "status", render: (v: string) => <Tag>{v}</Tag> },
+            {
+              title: "操作",
+              render: (_, r) => (
+                <Button
+                  size="small"
+                  onClick={() => {
+                    setEditing(r);
+                    editForm.setFieldsValue({
+                      invoice_no: r.invoice_no,
+                      bill_id: r.bill_id,
+                      issue_date: r.issue_date,
+                      amount_without_tax: r.total_amount,
+                      tax_amount: 0,
+                      total_amount: r.total_amount,
+                      status: r.status,
+                      remark: r.remark || "",
+                    });
+                    setOpenEdit(true);
+                  }}
+                >
+                  编辑
+                </Button>
+              ),
+            },
           ]}
         />
       </Card>
+      <Modal open={openEdit} title={`编辑发票 #${editing?.id || ""}`} onCancel={() => setOpenEdit(false)} onOk={update}>
+        <Form form={editForm} layout="vertical">
+          <Form.Item label="发票编号" name="invoice_no" rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item label="账单ID" name="bill_id" rules={[{ required: true }]}><InputNumber style={{ width: "100%" }} /></Form.Item>
+          <Form.Item label="开票日期" name="issue_date" rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item label="不含税金额" name="amount_without_tax" rules={[{ required: true }]}><InputNumber style={{ width: "100%" }} /></Form.Item>
+          <Form.Item label="税额" name="tax_amount" rules={[{ required: true }]}><InputNumber style={{ width: "100%" }} /></Form.Item>
+          <Form.Item label="总金额" name="total_amount" rules={[{ required: true }]}><InputNumber style={{ width: "100%" }} /></Form.Item>
+          <Form.Item label="状态" name="status" rules={[{ required: true }]}>
+            <Select options={[{ label: "待开票", value: "待开票" }, { label: "已开票", value: "已开票" }, { label: "已作废", value: "已作废" }]} />
+          </Form.Item>
+          <Form.Item label="备注" name="remark"><Input /></Form.Item>
+        </Form>
+      </Modal>
     </Space>
   );
 }

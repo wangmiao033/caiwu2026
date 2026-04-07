@@ -10,6 +10,7 @@ type SimpleItem = { id: number; name: string };
 type MapRow = { id: number; channel: string; game: string; revenue_share_ratio: number; rd_settlement_ratio: number };
 type RuleRow = {
   key: string;
+  row_no?: number;
   channel: string;
   game: string;
   discountType: "无" | "0.1折" | "0.05折";
@@ -22,6 +23,7 @@ type RuleRow = {
   chaofanRd: number;
   enabled: boolean;
   remark?: string;
+  error_message?: string;
 };
 
 const defaultRule = (): Omit<RuleRow, "key" | "channel" | "game"> => ({
@@ -48,6 +50,7 @@ export default function BillingRulesPage() {
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [importRows, setImportRows] = useState<RuleRow[]>([]);
+  const [onlyErrors, setOnlyErrors] = useState(false);
   const [form] = Form.useForm();
 
   useEffect(() => {
@@ -149,20 +152,34 @@ export default function BillingRulesPage() {
       const game = String(r["游戏"] || "").trim();
       const discountType = (String(r["折扣类型"] || "无").trim() || "无") as RuleRow["discountType"];
       const enabled = String(r["状态"] || "启用").includes("启");
+      const errs: string[] = [];
+      if (!game) errs.push("游戏为空");
+      if (!channel) errs.push("渠道为空");
+      if (!["无", "0.1折", "0.05折"].includes(discountType)) errs.push("折扣类型非法");
+      const cFee = Number(r["通道费"] || 0);
+      const tRate = Number(r["税点"] || 0);
+      const rd = Number(r["研发分成"] || 0.5);
+      const pRate = Number(r["私点"] || 0);
+      if (Number.isNaN(cFee)) errs.push("通道费格式非法");
+      if (Number.isNaN(tRate)) errs.push("税点格式非法");
+      if (Number.isNaN(rd)) errs.push("研发分成格式非法");
+      if (Number.isNaN(pRate)) errs.push("私点格式非法");
       const row: RuleRow = {
         key: `${channel}-${game}-${idx}`,
+        row_no: idx + 2,
         channel,
         game,
         discountType,
-        channelFee: Number(r["通道费"] || 0),
-        taxRate: Number(r["税点"] || 0),
-        rdShare: Number(r["研发分成"] || 0.5),
-        privateRate: Number(r["私点"] || 0),
+        channelFee: cFee,
+        taxRate: tRate,
+        rdShare: rd,
+        privateRate: pRate,
         ipLicense: Number(r["IP授权"] || 0),
         chaofanChannel: Number(r["超凡与渠道"] || 0),
         chaofanRd: Number(r["超凡与研发"] || 0),
         enabled,
         remark: String(r["备注"] || ""),
+        error_message: errs.join("；"),
       };
       return row;
     });
@@ -170,10 +187,15 @@ export default function BillingRulesPage() {
     setImportOpen(true);
   };
 
-  const importErrCount = importRows.filter((x) => !x.channel || !x.game || Number.isNaN(x.rdShare)).length;
+  const importErrCount = importRows.filter((x) => !!x.error_message).length;
   const importOkCount = importRows.length - importErrCount;
+  const previewRows = onlyErrors ? importRows.filter((x) => !!x.error_message) : importRows;
+  const exportErrors = () => {
+    const errs = importRows.filter((x) => !!x.error_message);
+    exportRowsToXlsx(errs as unknown as Record<string, unknown>[], "billing_rules_import_errors.xlsx");
+  };
   const confirmImport = async () => {
-    const valid = importRows.filter((x) => x.channel && x.game && !Number.isNaN(x.rdShare));
+    const valid = importRows.filter((x) => !x.error_message);
     try {
       const summary = await apiRequest<{ created_count: number; updated_count: number; failed_count: number }>(
         "/billing/rules/bulk-import",
@@ -299,12 +321,24 @@ export default function BillingRulesPage() {
           <Statistic title="正常行数" value={importOkCount} />
           <Statistic title="异常行数" value={importErrCount} valueStyle={{ color: importErrCount ? "#cf1322" : undefined }} />
         </Space>
+        <Space style={{ marginBottom: 8 }}>
+          <Button size="small" type={!onlyErrors ? "primary" : "default"} onClick={() => setOnlyErrors(false)}>
+            预览全部
+          </Button>
+          <Button size="small" type={onlyErrors ? "primary" : "default"} onClick={() => setOnlyErrors(true)}>
+            仅查看异常行
+          </Button>
+          <Button size="small" onClick={exportErrors}>
+            导出异常
+          </Button>
+        </Space>
         <Table
           rowKey="key"
-          dataSource={importRows}
+          dataSource={previewRows}
           pagination={{ pageSize: 8 }}
-          rowClassName={(r) => (!r.channel || !r.game || Number.isNaN(r.rdShare) ? "row-error" : "")}
+          rowClassName={(r) => (r.error_message ? "row-error" : "")}
           columns={[
+            { title: "Excel行号", dataIndex: "row_no", width: 100 },
             { title: "渠道", dataIndex: "channel" },
             { title: "游戏", dataIndex: "game" },
             { title: "折扣类型", dataIndex: "discountType" },
@@ -313,7 +347,8 @@ export default function BillingRulesPage() {
             { title: "研发分成", dataIndex: "rdShare" },
             {
               title: "异常原因",
-              render: (_, r) => (!r.channel || !r.game ? "渠道或游戏为空" : Number.isNaN(r.rdShare) ? "研发分成非法" : "-"),
+              dataIndex: "error_message",
+              render: (v: string) => v || "-",
             },
           ]}
         />

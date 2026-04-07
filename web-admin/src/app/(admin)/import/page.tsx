@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import {
   Button,
   Card,
+  Drawer,
   Empty,
   Form,
   Input,
@@ -52,11 +53,32 @@ type ManualRow = {
 };
 
 type ImportHistoryRow = {
-  key: number;
+  id: number;
+  import_type: string;
+  period: string;
+  file_name: string;
+  task_id: number;
+  total_count: number;
+  valid_count: number;
+  invalid_count: number;
+  amount_sum: number;
+  status: string;
+  summary: string;
+  created_at: string;
+  created_by: string;
+};
+
+type ImportHistoryListResp = {
+  items: ImportHistoryRow[];
+  total: number;
+  page: number;
+  page_size: number;
+};
+
+type ImportHistoryFilter = {
   fileName: string;
   period: string;
-  importedAt: string;
-  issueCount: number;
+  import_type: string;
   status: string;
 };
 
@@ -80,6 +102,10 @@ export default function ImportPage() {
   const [maps, setMaps] = useState<MappingItem[]>([]);
   const [manualRows, setManualRows] = useState<ManualRow[]>([{ key: 1 }]);
   const [history, setHistory] = useState<ImportHistoryRow[]>([]);
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const [historyFilter, setHistoryFilter] = useState<ImportHistoryFilter>({ fileName: "", period: "", import_type: "", status: "" });
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyDetail, setHistoryDetail] = useState<ImportHistoryRow | null>(null);
   const [loading, setLoading] = useState(false);
 
   const [extractFile, setExtractFile] = useState<File | null>(null);
@@ -104,10 +130,7 @@ export default function ImportPage() {
     apiRequest<{ channel: string; game: string }[]>("/channel-game-map")
       .then((data) => setMaps(data.map((x, idx) => ({ id: idx + 1, channel: x.channel, game: x.game }))))
       .catch(() => {});
-    const saved = localStorage.getItem("import_history");
-    if (saved) {
-      setHistory(JSON.parse(saved));
-    }
+    loadHistory(1);
     const manualDraft = localStorage.getItem("manual_import_draft");
     if (manualDraft) {
       try {
@@ -150,10 +173,22 @@ export default function ImportPage() {
     setPreview(data);
   };
 
-  const pushHistory = (row: Omit<ImportHistoryRow, "key">) => {
-    const next = [{ key: Date.now(), ...row }, ...history].slice(0, 20);
-    setHistory(next);
-    localStorage.setItem("import_history", JSON.stringify(next));
+  const loadHistory = async (page = historyPage) => {
+    const params = new URLSearchParams();
+    params.set("page", String(page));
+    params.set("page_size", "10");
+    if (historyFilter.period) params.set("period", historyFilter.period);
+    if (historyFilter.import_type) params.set("import_type", historyFilter.import_type);
+    if (historyFilter.status) params.set("status", historyFilter.status);
+    if (historyFilter.fileName) params.set("keyword", historyFilter.fileName);
+    try {
+      const data = await apiRequest<ImportHistoryListResp>(`/imports/history?${params.toString()}`);
+      setHistory(data.items || []);
+      setHistoryTotal(data.total || 0);
+      setHistoryPage(page);
+    } catch (e) {
+      message.error((e as Error).message);
+    }
   };
 
   const upload = async () => {
@@ -168,15 +203,9 @@ export default function ImportPage() {
         const formData = new FormData();
         formData.append("file", fileList[0].originFileObj as File);
         try {
-          const data = await apiRequest<Record<string, unknown>>(`/recon/import?period=${encodeURIComponent(period)}`, "POST", formData, true);
+          const data = await apiRequest<Record<string, unknown>>(`/recon/import?period=${encodeURIComponent(period)}&import_type=template`, "POST", formData, true);
           setResult(data);
-          pushHistory({
-            fileName: fileList[0].name || "unknown.xlsx",
-            period,
-            importedAt: new Date().toLocaleString(),
-            issueCount: Number(data.issue_count || 0),
-            status: Number(data.issue_count || 0) > 0 ? "异常待处理" : "待确认",
-          });
+          await loadHistory(1);
           message.success("导入完成");
         } catch (e) {
           message.error((e as Error).message);
@@ -223,13 +252,7 @@ export default function ImportPage() {
             })),
           });
           setResult(data);
-          pushHistory({
-            fileName: "manual-input",
-            period,
-            importedAt: new Date().toLocaleString(),
-            issueCount: Number(data.issue_count || 0),
-            status: Number(data.issue_count || 0) > 0 ? "异常待处理" : "待确认",
-          });
+          await loadHistory(1);
           message.success("手动数据提交成功");
         } catch (e) {
           message.error((e as Error).message);
@@ -371,13 +394,7 @@ export default function ImportPage() {
         try {
           const data = await apiRequestDirect<Record<string, unknown>>("/api/recon/extract", "POST", { period, rows: validRows });
           setResult(data);
-          pushHistory({
-            fileName: extractFile?.name || "extract-import.xlsx",
-            period,
-            importedAt: new Date().toLocaleString(),
-            issueCount: Number(data.issue_count || 0),
-            status: Number(data.issue_count || 0) > 0 ? "异常待处理" : "待确认",
-          });
+          await loadHistory(1);
           message.success("原表提取导入成功");
         } catch (e) {
           message.error((e as Error).message);
@@ -448,21 +465,75 @@ export default function ImportPage() {
                     ]}
                   />
                   <Card title="导入历史" size="small">
+                    <Space style={{ marginBottom: 8 }} wrap>
+                      <Input
+                        placeholder="关键字"
+                        value={historyFilter.fileName}
+                        onChange={(e) => setHistoryFilter((s) => ({ ...s, fileName: e.target.value }))}
+                      />
+                      <Input
+                        placeholder="账期"
+                        value={historyFilter.period}
+                        onChange={(e) => setHistoryFilter((s) => ({ ...s, period: e.target.value }))}
+                      />
+                      <Select
+                        allowClear
+                        placeholder="导入类型"
+                        style={{ width: 140 }}
+                        options={[
+                          { label: "template", value: "template" },
+                          { label: "manual", value: "manual" },
+                          { label: "extract", value: "extract" },
+                        ]}
+                        value={historyFilter.import_type || undefined}
+                        onChange={(v) => setHistoryFilter((s) => ({ ...s, import_type: v || "" }))}
+                      />
+                      <Select
+                        allowClear
+                        placeholder="状态"
+                        style={{ width: 140 }}
+                        options={[
+                          { label: "待确认", value: "待确认" },
+                          { label: "异常待处理", value: "异常待处理" },
+                        ]}
+                        value={historyFilter.status || undefined}
+                        onChange={(v) => setHistoryFilter((s) => ({ ...s, status: v || "" }))}
+                      />
+                      <Button onClick={() => loadHistory(1)}>查询</Button>
+                    </Space>
                     <Table
                       size="small"
-                      rowKey="key"
+                      rowKey="id"
                       dataSource={history}
                       locale={{ emptyText: <Empty description="暂无导入历史" /> }}
-                      pagination={{ pageSize: 5 }}
+                      pagination={{
+                        pageSize: 10,
+                        total: historyTotal,
+                        current: historyPage,
+                        onChange: (p) => loadHistory(p),
+                      }}
                       columns={[
-                        { title: "文件名", dataIndex: "fileName" },
+                        { title: "导入时间", dataIndex: "created_at" },
+                        { title: "导入类型", dataIndex: "import_type" },
+                        { title: "文件名", dataIndex: "file_name" },
                         { title: "账期", dataIndex: "period" },
-                        { title: "导入时间", dataIndex: "importedAt" },
-                        { title: "issue_count", dataIndex: "issueCount" },
+                        { title: "task_id", dataIndex: "task_id" },
+                        { title: "总行数", dataIndex: "total_count" },
+                        { title: "正常行数", dataIndex: "valid_count" },
+                        { title: "异常行数", dataIndex: "invalid_count" },
+                        { title: "流水合计", dataIndex: "amount_sum" },
                         {
                           title: "状态",
                           dataIndex: "status",
                           render: (v: string) => <Tag color={v === "异常待处理" ? "red" : "blue"}>{v}</Tag>,
+                        },
+                        {
+                          title: "操作",
+                          render: (_, r) => (
+                            <Button size="small" onClick={() => setHistoryDetail(r)}>
+                              详情
+                            </Button>
+                          ),
                         },
                       ]}
                     />
@@ -658,6 +729,32 @@ export default function ImportPage() {
           background: #fff1f0 !important;
         }
       `}</style>
+      <Drawer open={!!historyDetail} title={`导入历史详情 #${historyDetail?.id || ""}`} onClose={() => setHistoryDetail(null)} width={680}>
+        {historyDetail && (
+          <Table
+            pagination={false}
+            rowKey="k"
+            dataSource={[
+              { k: "导入类型", v: historyDetail.import_type },
+              { k: "账期", v: historyDetail.period },
+              { k: "文件名", v: historyDetail.file_name },
+              { k: "任务ID", v: historyDetail.task_id },
+              { k: "总行数", v: historyDetail.total_count },
+              { k: "正常行数", v: historyDetail.valid_count },
+              { k: "异常行数", v: historyDetail.invalid_count },
+              { k: "流水合计", v: historyDetail.amount_sum },
+              { k: "状态", v: historyDetail.status },
+              { k: "摘要", v: historyDetail.summary },
+              { k: "创建人", v: historyDetail.created_by },
+              { k: "创建时间", v: historyDetail.created_at },
+            ]}
+            columns={[
+              { title: "字段", dataIndex: "k", width: 180 },
+              { title: "值", dataIndex: "v" },
+            ]}
+          />
+        )}
+      </Drawer>
     </Space>
   );
 }

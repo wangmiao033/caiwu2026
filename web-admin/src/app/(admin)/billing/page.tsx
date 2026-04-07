@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Button, Card, Descriptions, Drawer, Input, Modal, Select, Space, Switch, Table, Tag, message } from "antd";
 import { apiRequest } from "@/lib/api";
 import { BillingRule, calcTrialResult, matchRuleForBill } from "@/lib/billingTrial";
-import { exportRowsToXlsx } from "@/lib/export";
+import { exportRowsToCsv, exportRowsToXlsx } from "@/lib/export";
 
 type BillRow = {
   id: number;
@@ -33,6 +33,7 @@ export default function BillingPage() {
   const [detail, setDetail] = useState<BillRow | null>(null);
   const [showTrial, setShowTrial] = useState(false);
   const [rules, setRules] = useState<BillingRule[]>([]);
+  const [exportFormat, setExportFormat] = useState<"xlsx" | "csv">("xlsx");
 
   useEffect(() => {
     const cache = localStorage.getItem("billing_rules_local");
@@ -127,7 +128,11 @@ export default function BillingPage() {
       创建时间: "",
       说明: "试算结果仅供前端预览核对，正式结算以后端结果为准",
     }));
-    exportRowsToXlsx(data, "billing_export.xlsx");
+    if (exportFormat === "csv") {
+      exportRowsToCsv(data, "billing_export.csv");
+    } else {
+      exportRowsToXlsx(data, "billing_export.xlsx");
+    }
   };
 
   return (
@@ -157,6 +162,15 @@ export default function BillingPage() {
               onChange={(v) => setFilterType(v || "")}
             />
             <Button onClick={loadBills}>查询</Button>
+            <Select
+              style={{ width: 100 }}
+              value={exportFormat}
+              onChange={(v) => setExportFormat(v)}
+              options={[
+                { label: "Excel", value: "xlsx" },
+                { label: "CSV", value: "csv" },
+              ]}
+            />
             <Button onClick={exportBills}>导出账单</Button>
             <Space>
               <span>显示试算结果</span>

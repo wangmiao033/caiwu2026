@@ -155,6 +155,39 @@ class ReconIssue(Base):
     resolved: Mapped[bool] = mapped_column(default=False)
 
 
+class ImportHistory(Base):
+    __tablename__ = "import_history"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    import_type: Mapped[str] = mapped_column(String(20), index=True)
+    period: Mapped[str] = mapped_column(String(20), index=True)
+    file_name: Mapped[str] = mapped_column(String(200), default="")
+    task_id: Mapped[int] = mapped_column(index=True)
+    total_count: Mapped[int] = mapped_column(default=0)
+    valid_count: Mapped[int] = mapped_column(default=0)
+    invalid_count: Mapped[int] = mapped_column(default=0)
+    amount_sum: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    status: Mapped[str] = mapped_column(String(30), default="待确认")
+    summary: Mapped[str] = mapped_column(String(500), default="")
+    created_by: Mapped[str] = mapped_column(String(50), default="system")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
+
+
+class InvoiceMeta(Base):
+    __tablename__ = "invoice_meta"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    invoice_id: Mapped[int] = mapped_column(ForeignKey("invoices.id"), unique=True, index=True)
+    remark: Mapped[str] = mapped_column(String(200), default="")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
+
+
+class ReceiptMeta(Base):
+    __tablename__ = "receipt_meta"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    receipt_id: Mapped[int] = mapped_column(ForeignKey("receipts.id"), unique=True, index=True)
+    remark: Mapped[str] = mapped_column(String(200), default="")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
+
+
 class BillingRule(Base):
     __tablename__ = "billing_rules"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -240,6 +273,7 @@ class RuleIn(BaseModel):
 
 
 class RuleBulkRow(BaseModel):
+    row_no: Optional[int] = None
     game: str
     channel: str
     discount_type: str = "无"
@@ -275,6 +309,8 @@ class InvoiceIn(BaseModel):
     amount_without_tax: Decimal
     tax_amount: Decimal
     total_amount: Decimal
+    status: InvoiceStatus = InvoiceStatus.issued
+    remark: str = ""
 
 
 class ReceiptIn(BaseModel):
@@ -283,6 +319,8 @@ class ReceiptIn(BaseModel):
     amount: Decimal
     bank_ref: str
     account_name: str
+    remark: str = ""
+    status: Optional[CollectionStatus] = None
 
 
 class Out(BaseModel):
@@ -298,6 +336,22 @@ class BillOut(Out):
     status: BillStatus
     version: int
     collection_status: CollectionStatus
+
+
+class ImportHistoryOut(Out):
+    id: int
+    import_type: str
+    period: str
+    file_name: str
+    task_id: int
+    total_count: int
+    valid_count: int
+    invalid_count: int
+    amount_sum: Decimal
+    status: str
+    summary: str
+    created_by: str
+    created_at: dt.datetime
 
 
 def get_db():
@@ -506,9 +560,10 @@ def delete_map(map_id: int, db: Session = Depends(get_db), _: dict = Depends(req
 @app.post("/recon/import")
 async def import_statement(
     period: str = Query(..., description="账期，例如 2026-03"),
+    import_type: str = Query(default="template"),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    _: dict = Depends(require_role([Role.admin, Role.finance, Role.ops])),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance, Role.ops])),
 ):
     content = await file.read()
     tmp = f"./tmp_{dt.datetime.now().timestamp()}.xlsx"
@@ -528,10 +583,13 @@ async def import_statement(
     db.add(task)
     db.flush()
     issue_count = 0
+    total_count = int(len(df.index))
+    amount_sum = Decimal("0")
     for _, row in df.iterrows():
         channel_name = str(row["channel_name"]).strip()
         game_name = str(row["game_name"]).strip()
         gross_amount = Decimal(str(row["gross_amount"]))
+        amount_sum += gross_amount
         db.add(
             RawStatement(
                 recon_task_id=task.id,
@@ -566,8 +624,34 @@ async def import_statement(
             )
             issue_count += 1
     task.status = ReconStatus.issue if issue_count > 0 else ReconStatus.pending
+    valid_count = max(total_count - issue_count, 0)
+    summary_text = f"总行数:{total_count}, 正常:{valid_count}, 异常:{issue_count}, 流水合计:{amount_sum}"
+    db.add(
+        ImportHistory(
+            import_type=import_type,
+            period=period,
+            file_name=file.filename or "",
+            task_id=task.id,
+            total_count=total_count,
+            valid_count=valid_count,
+            invalid_count=issue_count,
+            amount_sum=amount_sum,
+            status="异常待处理" if issue_count > 0 else "待确认",
+            summary=summary_text,
+            created_by=ctx.get("user", "system"),
+        )
+    )
     db.commit()
-    return {"recon_task_id": task.id, "issue_count": issue_count}
+    return {
+        "recon_task_id": task.id,
+        "issue_count": issue_count,
+        "summary": {
+            "total_count": total_count,
+            "valid_count": valid_count,
+            "invalid_count": issue_count,
+            "amount_sum": amount_sum,
+        },
+    }
 
 
 @app.post("/recon/{task_id}/confirm")
@@ -645,8 +729,45 @@ def bulk_import_rules(payload: RuleBulkIn, db: Session = Depends(get_db), _: dic
     created_count = 0
     updated_count = 0
     failed_count = 0
-    for row in payload.rows:
+    error_details = []
+    channel_set = {x.name for x in db.scalars(select(Channel)).all()}
+    game_set = {x.name for x in db.scalars(select(Game)).all()}
+    valid_discount = {"无", "0.1折", "0.05折"}
+    valid_status = {"启用", "停用", "enabled", "disabled", "true", "false", "1", "0"}
+    for idx, row in enumerate(payload.rows):
         try:
+            errs = []
+            if not row.game:
+                errs.append("游戏为空")
+            if not row.channel:
+                errs.append("渠道为空")
+            if row.game and row.game not in game_set:
+                errs.append("游戏不存在")
+            if row.channel and row.channel not in channel_set:
+                errs.append("渠道不存在")
+            if row.discount_type not in valid_discount:
+                errs.append("折扣类型非法")
+            if row.status not in valid_status:
+                errs.append("状态非法")
+            for val, name in [
+                (row.channel_fee, "通道费格式非法"),
+                (row.tax_rate, "税点格式非法"),
+                (row.rd_share, "研发分成格式非法"),
+                (row.private_rate, "私点格式非法"),
+            ]:
+                if val is None:
+                    errs.append(name)
+            if errs:
+                failed_count += 1
+                error_details.append(
+                    {
+                        "row_no": row.row_no or idx + 2,
+                        "raw_data": row.model_dump(),
+                        "error_fields": errs,
+                        "error_message": ";".join(errs),
+                    }
+                )
+                continue
             name = f"{row.channel}-{row.game}-rule"
             existing = db.scalar(select(BillingRule).where(BillingRule.name == name))
             if existing:
@@ -666,7 +787,12 @@ def bulk_import_rules(payload: RuleBulkIn, db: Session = Depends(get_db), _: dic
         except Exception:
             failed_count += 1
     db.commit()
-    return {"created_count": created_count, "updated_count": updated_count, "failed_count": failed_count}
+    return {
+        "created_count": created_count,
+        "updated_count": updated_count,
+        "failed_count": failed_count,
+        "error_details": error_details,
+    }
 
 
 @app.get("/billing/rules/export")
@@ -761,8 +887,18 @@ def create_invoice(payload: InvoiceIn, db: Session = Depends(get_db), _: dict = 
     bill = db.get(Bill, payload.bill_id)
     if not bill:
         raise HTTPException(status_code=404, detail="账单不存在")
-    invoice = Invoice(**payload.model_dump(), status=InvoiceStatus.issued)
+    invoice = Invoice(
+        invoice_no=payload.invoice_no,
+        bill_id=payload.bill_id,
+        issue_date=payload.issue_date,
+        amount_without_tax=payload.amount_without_tax,
+        tax_amount=payload.tax_amount,
+        total_amount=payload.total_amount,
+        status=payload.status,
+    )
     db.add(invoice)
+    db.flush()
+    db.add(InvoiceMeta(invoice_id=invoice.id, remark=payload.remark))
     db.commit()
     return {"id": invoice.id, "invoice_no": invoice.invoice_no}
 
@@ -779,6 +915,7 @@ def list_invoices(
     result = []
     for x in rows:
         bill = db.get(Bill, x.bill_id)
+        meta = db.scalar(select(InvoiceMeta).where(InvoiceMeta.invoice_id == x.id))
         item = {
             "id": x.id,
             "invoice_no": x.invoice_no,
@@ -788,8 +925,8 @@ def list_invoices(
             "status": x.status,
             "target_name": bill.target_name if bill else "",
             "period": bill.period if bill else "",
-            "created_at": str(x.issue_date),
-            "remark": "",
+            "created_at": str(meta.created_at if meta else x.issue_date),
+            "remark": meta.remark if meta else "",
         }
         result.append(item)
     if status:
@@ -812,8 +949,14 @@ def update_invoice(invoice_id: int, payload: InvoiceIn, db: Session = Depends(ge
     row.amount_without_tax = payload.amount_without_tax
     row.tax_amount = payload.tax_amount
     row.total_amount = payload.total_amount
+    row.status = payload.status
+    meta = db.scalar(select(InvoiceMeta).where(InvoiceMeta.invoice_id == row.id))
+    if meta:
+        meta.remark = payload.remark
+    else:
+        db.add(InvoiceMeta(invoice_id=row.id, remark=payload.remark))
     db.commit()
-    return {"id": row.id}
+    return {"id": row.id, "status": row.status}
 
 
 @app.post("/receipts")
@@ -821,9 +964,16 @@ def register_receipt(payload: ReceiptIn, db: Session = Depends(get_db), _: dict 
     bill = db.get(Bill, payload.bill_id)
     if not bill:
         raise HTTPException(status_code=404, detail="账单不存在")
-    receipt = Receipt(**payload.model_dump())
+    receipt = Receipt(
+        bill_id=payload.bill_id,
+        received_at=payload.received_at,
+        amount=payload.amount,
+        bank_ref=payload.bank_ref,
+        account_name=payload.account_name,
+    )
     db.add(receipt)
     db.flush()
+    db.add(ReceiptMeta(receipt_id=receipt.id, remark=payload.remark))
     received_total = db.scalar(select(func.coalesce(func.sum(Receipt.amount), 0)).where(Receipt.bill_id == payload.bill_id))
     if received_total >= bill.amount:
         bill.collection_status = CollectionStatus.paid
@@ -847,6 +997,7 @@ def list_receipts(
     result = []
     for x in rows:
         bill = db.get(Bill, x.bill_id)
+        meta = db.scalar(select(ReceiptMeta).where(ReceiptMeta.receipt_id == x.id))
         item = {
             "id": x.id,
             "bill_id": x.bill_id,
@@ -857,8 +1008,8 @@ def list_receipts(
             "target_name": bill.target_name if bill else "",
             "period": bill.period if bill else "",
             "status": bill.collection_status if bill else "",
-            "remark": "",
-            "created_at": str(x.received_at),
+            "remark": meta.remark if meta else "",
+            "created_at": str(meta.created_at if meta else x.received_at),
         }
         result.append(item)
     if status:
@@ -880,8 +1031,51 @@ def update_receipt(receipt_id: int, payload: ReceiptIn, db: Session = Depends(ge
     row.amount = payload.amount
     row.bank_ref = payload.bank_ref
     row.account_name = payload.account_name
+    meta = db.scalar(select(ReceiptMeta).where(ReceiptMeta.receipt_id == row.id))
+    if meta:
+        meta.remark = payload.remark
+    else:
+        db.add(ReceiptMeta(receipt_id=row.id, remark=payload.remark))
+    if payload.status:
+        bill = db.get(Bill, row.bill_id)
+        if bill:
+            bill.collection_status = payload.status
     db.commit()
     return {"id": row.id}
+
+
+@app.get("/imports/history")
+def list_import_history(
+    period: Optional[str] = None,
+    import_type: Optional[str] = None,
+    status: Optional[str] = None,
+    keyword: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance, Role.ops, Role.biz])),
+):
+    rows = db.scalars(select(ImportHistory).order_by(ImportHistory.id.desc())).all()
+    if period:
+        rows = [x for x in rows if period in x.period]
+    if import_type:
+        rows = [x for x in rows if x.import_type == import_type]
+    if status:
+        rows = [x for x in rows if status in x.status]
+    if keyword:
+        rows = [x for x in rows if keyword in f"{x.file_name}{x.summary}{x.created_by}"]
+    total = len(rows)
+    start = (max(page, 1) - 1) * max(page_size, 1)
+    end = start + max(page_size, 1)
+    return {"items": rows[start:end], "total": total, "page": page, "page_size": page_size}
+
+
+@app.get("/imports/history/{history_id}", response_model=ImportHistoryOut)
+def get_import_history(history_id: int, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.ops, Role.biz]))):
+    row = db.get(ImportHistory, history_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="导入历史不存在")
+    return row
 
 
 @app.get("/dashboard/finance")
