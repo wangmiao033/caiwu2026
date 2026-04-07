@@ -23,7 +23,19 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./reconciliation.db")
+def resolve_database_url() -> str:
+    db_url = os.getenv("DATABASE_URL", "").strip()
+    app_env = os.getenv("APP_ENV", "").strip().lower()
+    on_vercel = bool(os.getenv("VERCEL"))
+    local_mode = app_env in {"local", "development", "dev"} or not on_vercel
+    if db_url:
+        return db_url
+    if local_mode:
+        return "sqlite:///./reconciliation.db"
+    raise RuntimeError("DATABASE_URL is required in non-local environment.")
+
+
+DATABASE_URL = resolve_database_url()
 engine = create_engine(DATABASE_URL, echo=False, future=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 

@@ -52,7 +52,8 @@ npm run dev
 关键变量：
 
 - `BACKEND_BASE_URL`：前端 Next API 代理转发到后端的地址
-- `DATABASE_URL`：后端数据库连接
+- `APP_ENV`：后端环境标记（local/production）
+- `DATABASE_URL`：后端数据库连接（Vercel 必填外部数据库）
 
 ## Vercel 部署（双 Project）
 
@@ -60,6 +61,11 @@ npm run dev
 
 1. `web-admin` 项目：Root Directory = `web-admin`
 2. `backend` 项目：Root Directory = `backend`
+
+数据库注意事项：
+
+- 本地开发：可使用 SQLite 回退（便于快速启动）
+- Vercel 线上：必须配置外部数据库 `DATABASE_URL`，不能使用本地 SQLite 作为正式库
 
 详细步骤见：
 

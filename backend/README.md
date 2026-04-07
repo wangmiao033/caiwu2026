@@ -11,15 +11,27 @@ uvicorn app:app --reload --host 0.0.0.0 --port 8000
 
 ## 环境变量
 
+- `APP_ENV`：运行环境标记
+  - 本地建议：`local`
+  - 线上建议：`production`
 - `DATABASE_URL`：数据库连接字符串
-  - 本地默认：`sqlite:///./reconciliation.db`
-  - 生产可改为 PostgreSQL 连接
+  - 本地开发：可使用 SQLite（`sqlite:///./reconciliation.db`）
+  - Vercel 线上：必须使用外部数据库连接（例如 PostgreSQL），不要使用本地 SQLite 文件
+
+数据库加载策略：
+
+- 优先读取 `DATABASE_URL`
+- 若未设置 `DATABASE_URL` 且是本地模式（`APP_ENV=local` 或非 Vercel），回退 SQLite
+- 若是非本地环境（如 Vercel）且没配 `DATABASE_URL`，启动直接报错
 
 ## Vercel 部署
 
 - Root Directory：`backend`
 - Vercel Runtime：Python（由 `vercel.json` 和 `api/index.py` 适配）
 - API 入口：`api/index.py`（导出 `app`）
+- 必填环境变量：
+  - `APP_ENV=production`
+  - `DATABASE_URL=<外部数据库连接串>`
 
 说明：
 
