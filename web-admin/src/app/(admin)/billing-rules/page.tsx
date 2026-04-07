@@ -27,6 +27,10 @@ type RuleRow = {
   error_fields?: string[];
 };
 
+const ratioToPercent = (ratio: number) => ratio * 100;
+const percentToRatio = (percent: number) => percent / 100;
+const formatRatioAsPercent = (ratio: number) => `${Number((ratioToPercent(ratio)).toFixed(4)).toString()}%`;
+
 const defaultRule = (): Omit<RuleRow, "key" | "channel" | "game"> => ({
   discountType: "无",
   channelFee: 0,
@@ -96,7 +100,13 @@ export default function BillingRulesPage() {
 
   const onEdit = (row: RuleRow) => {
     setEditingKey(row.key);
-    form.setFieldsValue(row);
+    form.setFieldsValue({
+      ...row,
+      channelFee: ratioToPercent(row.channelFee),
+      taxRate: ratioToPercent(row.taxRate),
+      rdShare: ratioToPercent(row.rdShare),
+      privateRate: ratioToPercent(row.privateRate),
+    });
     setOpen(true);
   };
 
@@ -105,7 +115,16 @@ export default function BillingRulesPage() {
     const channel = values.channel as string;
     const game = values.game as string;
     const key = `${channel}-${game}`;
-    const item: RuleRow = { key, channel, game, ...values };
+    const item: RuleRow = {
+      key,
+      channel,
+      game,
+      ...values,
+      channelFee: percentToRatio(Number(values.channelFee || 0)),
+      taxRate: percentToRatio(Number(values.taxRate || 0)),
+      rdShare: percentToRatio(Number(values.rdShare || 0)),
+      privateRate: percentToRatio(Number(values.privateRate || 0)),
+    };
     const next = editingKey ? rules.map((x) => (x.key === editingKey ? item : x)) : [item, ...rules.filter((x) => x.key !== key)];
     saveLocal(next);
 
@@ -131,7 +150,7 @@ export default function BillingRulesPage() {
           折扣类型: "无",
           通道费: 0,
           税点: 0,
-          研发分成: 0.5,
+          研发分成: 50,
           私点: 0,
           IP授权: 0,
           超凡与渠道: 0,
@@ -157,14 +176,18 @@ export default function BillingRulesPage() {
       if (!game) errs.push("游戏为空");
       if (!channel) errs.push("渠道为空");
       if (!["无", "0.1折", "0.05折"].includes(discountType)) errs.push("折扣类型非法");
-      const cFee = Number(r["通道费"] || 0);
-      const tRate = Number(r["税点"] || 0);
-      const rd = Number(r["研发分成"] || 0.5);
-      const pRate = Number(r["私点"] || 0);
-      if (Number.isNaN(cFee)) errs.push("通道费格式非法");
-      if (Number.isNaN(tRate)) errs.push("税点格式非法");
-      if (Number.isNaN(rd)) errs.push("研发分成格式非法");
-      if (Number.isNaN(pRate)) errs.push("私点格式非法");
+      const cFeePercent = Number(r["通道费"] || 0);
+      const tRatePercent = Number(r["税点"] || 0);
+      const rdPercent = Number(r["研发分成"] || 50);
+      const pRatePercent = Number(r["私点"] || 0);
+      const cFee = percentToRatio(cFeePercent);
+      const tRate = percentToRatio(tRatePercent);
+      const rd = percentToRatio(rdPercent);
+      const pRate = percentToRatio(pRatePercent);
+      if (Number.isNaN(cFeePercent)) errs.push("通道费格式非法");
+      if (Number.isNaN(tRatePercent)) errs.push("税点格式非法");
+      if (Number.isNaN(rdPercent)) errs.push("研发分成格式非法");
+      if (Number.isNaN(pRatePercent)) errs.push("私点格式非法");
       const row: RuleRow = {
         key: `${channel}-${game}-${idx}`,
         row_no: idx + 2,
@@ -321,10 +344,10 @@ export default function BillingRulesPage() {
           { title: "渠道", dataIndex: "channel" },
           { title: "游戏", dataIndex: "game" },
           { title: "折扣", dataIndex: "discountType" },
-          { title: "通道费", dataIndex: "channelFee" },
-          { title: "税点", dataIndex: "taxRate" },
-          { title: "研发分成", dataIndex: "rdShare" },
-          { title: "私点", dataIndex: "privateRate" },
+          { title: "通道费", dataIndex: "channelFee", render: (v: number) => formatRatioAsPercent(v) },
+          { title: "税点", dataIndex: "taxRate", render: (v: number) => formatRatioAsPercent(v) },
+          { title: "研发分成", dataIndex: "rdShare", render: (v: number) => formatRatioAsPercent(v) },
+          { title: "私点", dataIndex: "privateRate", render: (v: number) => formatRatioAsPercent(v) },
           {
             title: "状态",
             dataIndex: "enabled",
@@ -335,7 +358,19 @@ export default function BillingRulesPage() {
       />
 
       <Modal open={open} title={editingKey ? "编辑规则" : "新增规则"} onCancel={() => setOpen(false)} onOk={onSubmit}>
-        <Form form={form} layout="vertical" initialValues={{ ...defaultRule(), channel: maps[0]?.channel, game: maps[0]?.game }}>
+        <Form
+          form={form}
+          layout="vertical"
+          initialValues={{
+            ...defaultRule(),
+            channel: maps[0]?.channel,
+            game: maps[0]?.game,
+            channelFee: ratioToPercent(defaultRule().channelFee),
+            taxRate: ratioToPercent(defaultRule().taxRate),
+            rdShare: ratioToPercent(defaultRule().rdShare),
+            privateRate: ratioToPercent(defaultRule().privateRate),
+          }}
+        >
           <Form.Item label="渠道" name="channel" rules={[{ required: true }]}>
             <Select options={channels.map((x) => ({ label: x.name, value: x.name }))} />
           </Form.Item>
@@ -345,10 +380,10 @@ export default function BillingRulesPage() {
           <Form.Item label="折扣类型" name="discountType">
             <Select options={[{ label: "无", value: "无" }, { label: "0.1折", value: "0.1折" }, { label: "0.05折", value: "0.05折" }]} />
           </Form.Item>
-          <Form.Item label="通道费" name="channelFee"><InputNumber min={0} max={1} step={0.01} style={{ width: "100%" }} /></Form.Item>
-          <Form.Item label="税点" name="taxRate"><InputNumber min={0} max={1} step={0.01} style={{ width: "100%" }} /></Form.Item>
-          <Form.Item label="研发分成" name="rdShare"><InputNumber min={0} max={1} step={0.01} style={{ width: "100%" }} /></Form.Item>
-          <Form.Item label="私点" name="privateRate"><InputNumber min={0} max={1} step={0.01} style={{ width: "100%" }} /></Form.Item>
+          <Form.Item label="通道费(%)" name="channelFee"><InputNumber min={0} max={100} step={0.01} style={{ width: "100%" }} /></Form.Item>
+          <Form.Item label="税点(%)" name="taxRate"><InputNumber min={0} max={100} step={0.01} style={{ width: "100%" }} /></Form.Item>
+          <Form.Item label="研发分成(%)" name="rdShare"><InputNumber min={0} max={100} step={0.01} style={{ width: "100%" }} /></Form.Item>
+          <Form.Item label="私点(%)" name="privateRate"><InputNumber min={0} max={100} step={0.01} style={{ width: "100%" }} /></Form.Item>
           <Form.Item label="IP授权（预留）" name="ipLicense"><InputNumber min={0} step={0.01} style={{ width: "100%" }} /></Form.Item>
           <Form.Item label="超凡与渠道（预留）" name="chaofanChannel"><InputNumber min={0} step={0.01} style={{ width: "100%" }} /></Form.Item>
           <Form.Item label="超凡与研发（预留）" name="chaofanRd"><InputNumber min={0} step={0.01} style={{ width: "100%" }} /></Form.Item>
@@ -390,10 +425,10 @@ export default function BillingRulesPage() {
             { title: "渠道", dataIndex: "channel", render: (v, r) => markCell(v, r, "channel") },
             { title: "游戏", dataIndex: "game", render: (v, r) => markCell(v, r, "game") },
             { title: "折扣类型", dataIndex: "discountType", render: (v, r) => markCell(v, r, "discount_type") },
-            { title: "通道费", dataIndex: "channelFee", render: (v, r) => markCell(v, r, "channel_fee") },
-            { title: "税点", dataIndex: "taxRate", render: (v, r) => markCell(v, r, "tax_rate") },
-            { title: "研发分成", dataIndex: "rdShare", render: (v, r) => markCell(v, r, "rd_share") },
-            { title: "私点", dataIndex: "privateRate", render: (v, r) => markCell(v, r, "private_rate") },
+            { title: "通道费", dataIndex: "channelFee", render: (v, r) => markCell(formatRatioAsPercent(Number(v || 0)), r, "channel_fee") },
+            { title: "税点", dataIndex: "taxRate", render: (v, r) => markCell(formatRatioAsPercent(Number(v || 0)), r, "tax_rate") },
+            { title: "研发分成", dataIndex: "rdShare", render: (v, r) => markCell(formatRatioAsPercent(Number(v || 0)), r, "rd_share") },
+            { title: "私点", dataIndex: "privateRate", render: (v, r) => markCell(formatRatioAsPercent(Number(v || 0)), r, "private_rate") },
             { title: "状态", dataIndex: "enabled", render: (v, r) => markCell(v ? "启用" : "停用", r, "status") },
             {
               title: "异常原因",
