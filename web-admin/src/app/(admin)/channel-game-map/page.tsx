@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Button, Card, Form, Input, InputNumber, Modal, Result, Select, Space, Table, Tag, message } from "antd";
+import { Button, Card, Form, Input, InputNumber, Modal, Select, Space, Table, Tag, message } from "antd";
 import { apiRequest } from "@/lib/api";
 import { buildExportFilename, exportRowsToCsv, exportRowsToXlsx } from "@/lib/export";
-import { getCurrentRole } from "@/lib/rbac";
+import RoleGuard from "@/components/RoleGuard";
 
 type Channel = { id: number; name: string };
 type Game = { id: number; name: string };
@@ -19,8 +19,6 @@ type BulkInputItem = { channel_name: string; game_name: string };
 type BulkPreviewRow = { key: string; channel_name: string; game_name: string; status: string; reason: string };
 
 export default function ChannelGameMapPage() {
-  const role = getCurrentRole();
-  const canAccess = role === "admin" || role === "finance_manager" || role === "tech";
   const [rows, setRows] = useState<Row[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [games, setGames] = useState<Game[]>([]);
@@ -37,10 +35,6 @@ export default function ChannelGameMapPage() {
   const toRatio = (percent: number) => Number((percent / 100).toFixed(4));
   const calcPublishRatio = (channelRatio: number, rdRatio: number) => Number((1 - channelRatio - rdRatio).toFixed(4));
   const isTotalValid = (channelRatio: number, rdRatio: number, publishRatio: number) => Math.abs(channelRatio + rdRatio + publishRatio - 1) < 0.0001;
-
-  if (!canAccess) {
-    return <Result status="403" title="403" subTitle="当前角色无权限访问渠道映射页面" />;
-  }
 
   const loadMeta = async () => {
     const [c, g] = await Promise.all([apiRequest<Channel[]>("/channels"), apiRequest<Game[]>("/games")]);
@@ -206,7 +200,8 @@ export default function ChannelGameMapPage() {
       : undefined;
 
   return (
-    <Card
+    <RoleGuard allow={["admin", "finance_manager", "tech"]}>
+      <Card
       title="渠道-游戏映射"
       extra={
         <Space>
@@ -357,6 +352,7 @@ export default function ChannelGameMapPage() {
           />
         </Space>
       </Modal>
-    </Card>
+      </Card>
+    </RoleGuard>
   );
 }

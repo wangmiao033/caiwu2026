@@ -18,3 +18,7 @@ export function getCurrentRole(): AppRole {
 export function hasRole(roles: AppRole[]): boolean {
   return roles.includes(getCurrentRole());
 }
+
+export function canAccessPage(allow: AppRole[]): boolean {
+  return hasRole(allow);
+}
