@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button, Card, Form, InputNumber, Modal, Select, Space, Table, message } from "antd";
 import { apiRequest } from "@/lib/api";
+import { buildExportFilename, exportRowsToXlsx } from "@/lib/export";
 
 type Channel = { id: number; name: string };
 type Game = { id: number; name: string };
@@ -72,6 +73,19 @@ export default function ChannelGameMapPage() {
     () => rows.filter((x) => (!qChannel || x.channel === qChannel) && (!qGame || x.game === qGame)),
     [rows, qChannel, qGame]
   );
+  const exportCurrent = () => {
+    exportRowsToXlsx(
+      filtered.map((x) => ({
+        映射ID: x.id,
+        渠道: x.channel,
+        游戏: x.game,
+        渠道分成: x.revenue_share_ratio,
+        研发分成: x.rd_settlement_ratio,
+      })),
+      buildExportFilename("channel_game_map", "xlsx")
+    );
+    message.success("导出成功");
+  };
   useEffect(() => {
     load();
   }, []);
@@ -98,6 +112,7 @@ export default function ChannelGameMapPage() {
             onChange={(v) => setQGame(v || "")}
           />
           <Button onClick={load}>刷新</Button>
+          <Button onClick={exportCurrent}>导出当前筛选</Button>
           <Button
             type="primary"
             onClick={() => {

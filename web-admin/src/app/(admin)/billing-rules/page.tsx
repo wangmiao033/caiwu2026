@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button, Card, Form, Input, InputNumber, Modal, Select, Space, Statistic, Switch, Table, Tag, Upload, message } from "antd";
 import { apiRequest } from "@/lib/api";
-import { exportRowsToXlsx } from "@/lib/export";
+import { buildExportFilename, exportRowsToXlsx } from "@/lib/export";
 import * as XLSX from "xlsx";
 
 type SimpleItem = { id: number; name: string };
@@ -140,7 +140,7 @@ export default function BillingRulesPage() {
           备注: "",
         },
       ],
-      "billing_rules_template.xlsx"
+      buildExportFilename("billing_rules_template", "xlsx")
     );
   };
 
@@ -230,7 +230,8 @@ export default function BillingRulesPage() {
   );
   const exportErrors = () => {
     const errs = importRows.filter((x) => !!x.error_message);
-    exportRowsToXlsx(errs as unknown as Record<string, unknown>[], "billing_rules_import_errors.xlsx");
+    exportRowsToXlsx(errs as unknown as Record<string, unknown>[], buildExportFilename("billing_rules_import_errors", "xlsx"));
+    message.success("导出成功");
   };
   const confirmImport = async () => {
     const valid = importRows.filter((x) => !x.error_message);
@@ -264,10 +265,12 @@ export default function BillingRulesPage() {
   };
 
   const exportCurrent = () => {
-    exportRowsToXlsx(filtered as unknown as Record<string, unknown>[], "billing_rules_filtered.xlsx");
+    exportRowsToXlsx(filtered as unknown as Record<string, unknown>[], buildExportFilename("billing_rules", "xlsx"));
+    message.success("导出成功");
   };
   const exportAll = () => {
-    exportRowsToXlsx(rules as unknown as Record<string, unknown>[], "billing_rules_all.xlsx");
+    exportRowsToXlsx(rules as unknown as Record<string, unknown>[], buildExportFilename("billing_rules_all", "xlsx"));
+    message.success("导出成功");
   };
 
   return (

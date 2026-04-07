@@ -17,6 +17,9 @@ uvicorn app:app --reload --host 0.0.0.0 --port 8000
 - `DATABASE_URL`：数据库连接字符串
   - 本地开发：可使用 SQLite（`sqlite:///./reconciliation.db`）
   - Vercel 线上：必须使用外部数据库连接（例如 PostgreSQL），不要使用本地 SQLite 文件
+- `ADMIN_USERNAME`：管理员用户名（单管理员模式）
+- `ADMIN_PASSWORD`：管理员密码（单管理员模式）
+  - 未配置时默认 `admin / 123456`（仅建议本地开发使用）
 
 数据库加载策略：
 

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button, Card, Form, Input, Modal, Space, Table, message } from "antd";
 import { apiRequest } from "@/lib/api";
+import { buildExportFilename, exportRowsToXlsx } from "@/lib/export";
 
 type Row = { id: number; name: string; rd_company: string };
 
@@ -52,6 +53,13 @@ export default function GamesPage() {
     });
 
   const filtered = useMemo(() => rows.filter((x) => `${x.name}${x.rd_company}`.includes(keyword)), [rows, keyword]);
+  const exportCurrent = () => {
+    exportRowsToXlsx(
+      filtered.map((x) => ({ 游戏ID: x.id, 游戏名称: x.name, 研发主体: x.rd_company })),
+      buildExportFilename("games", "xlsx")
+    );
+    message.success("导出成功");
+  };
   useEffect(() => {
     load();
   }, []);
@@ -63,6 +71,7 @@ export default function GamesPage() {
         <Space>
           <Input placeholder="搜索游戏" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
           <Button onClick={load}>刷新</Button>
+          <Button onClick={exportCurrent}>导出当前筛选</Button>
           <Button
             type="primary"
             onClick={() => {

@@ -93,8 +93,11 @@ class User(Base):
     role: Mapped[Role] = mapped_column(Enum(Role))
 
 
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "123456")
+
 LOCAL_USERS = {
-    "admin": {"password": "123456", "role": Role.admin},
+    ADMIN_USERNAME: {"password": ADMIN_PASSWORD, "role": Role.admin},
     "finance": {"password": "123456", "role": Role.finance},
     "biz": {"password": "123456", "role": Role.biz},
     "ops": {"password": "123456", "role": Role.ops},
@@ -270,6 +273,17 @@ class AuditLog(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
 
 
+class SystemAuditLog(Base):
+    __tablename__ = "system_audit_logs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    operator: Mapped[str] = mapped_column(String(50), index=True)
+    action: Mapped[str] = mapped_column(String(100), index=True)
+    target_type: Mapped[str] = mapped_column(String(50), index=True)
+    target_id: Mapped[str] = mapped_column(String(100), default="")
+    summary: Mapped[str] = mapped_column(String(500), default="")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now(), index=True)
+
+
 class ChannelIn(BaseModel):
     name: str
 
@@ -423,6 +437,26 @@ def unauthorized(message: str = "未登录或登录已过期"):
     return HTTPException(status_code=401, detail={"code": 401, "message": message})
 
 
+def write_system_audit(
+    db: Session,
+    operator: str,
+    action: str,
+    target_type: str,
+    target_id: str = "",
+    summary: str = "",
+):
+    db.add(
+        SystemAuditLog(
+            operator=operator or "system",
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            summary=summary,
+            created_at=dt.datetime.now(),
+        )
+    )
+
+
 def require_role(roles: list[Role]):
     def checker(
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
@@ -482,18 +516,22 @@ def root():
 
 
 @app.post("/login")
-def login(payload: LoginIn):
+def login(payload: LoginIn, db: Session = Depends(get_db)):
     user = LOCAL_USERS.get(payload.username)
     if not user or user["password"] != payload.password:
         raise HTTPException(status_code=401, detail={"code": 401, "message": "用户名或密码错误"})
     token = build_token(payload.username, user["role"])
+    write_system_audit(db, payload.username, "login_success", "auth", payload.username, "登录成功")
+    db.commit()
     return {"access_token": token, "token_type": "bearer"}
 
 
 @app.post("/channels")
-def create_channel(payload: ChannelIn, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.biz, Role.ops]))):
+def create_channel(payload: ChannelIn, db: Session = Depends(get_db), ctx: dict = Depends(require_role([Role.admin, Role.biz, Role.ops]))):
     channel = Channel(name=payload.name)
     db.add(channel)
+    db.flush()
+    write_system_audit(db, ctx["user"], "create_channel", "channel", str(channel.id), f"新增渠道: {payload.name}")
     db.commit()
     return {"id": channel.id, "name": channel.name}
 
@@ -509,6 +547,7 @@ def update_channel(channel_id: int, payload: ChannelIn, db: Session = Depends(ge
     if not row:
         raise HTTPException(status_code=404, detail="渠道不存在")
     row.name = payload.name
+    write_system_audit(db, _["user"], "update_channel", "channel", str(row.id), f"编辑渠道: {payload.name}")
     db.commit()
     return {"id": row.id, "name": row.name}
 
@@ -518,15 +557,18 @@ def delete_channel(channel_id: int, db: Session = Depends(get_db), _: dict = Dep
     row = db.get(Channel, channel_id)
     if not row:
         raise HTTPException(status_code=404, detail="渠道不存在")
+    write_system_audit(db, _["user"], "delete_channel", "channel", str(row.id), f"删除渠道: {row.name}")
     db.delete(row)
     db.commit()
     return {"id": channel_id, "deleted": True}
 
 
 @app.post("/games")
-def create_game(payload: GameIn, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.biz, Role.ops]))):
+def create_game(payload: GameIn, db: Session = Depends(get_db), ctx: dict = Depends(require_role([Role.admin, Role.biz, Role.ops]))):
     game = Game(name=payload.name, rd_company=payload.rd_company)
     db.add(game)
+    db.flush()
+    write_system_audit(db, ctx["user"], "create_game", "game", str(game.id), f"新增游戏: {payload.name}")
     db.commit()
     return {"id": game.id, "name": game.name}
 
@@ -543,6 +585,7 @@ def update_game(game_id: int, payload: GameIn, db: Session = Depends(get_db), _:
         raise HTTPException(status_code=404, detail="游戏不存在")
     row.name = payload.name
     row.rd_company = payload.rd_company
+    write_system_audit(db, _["user"], "update_game", "game", str(row.id), f"编辑游戏: {payload.name}")
     db.commit()
     return {"id": row.id, "name": row.name}
 
@@ -552,6 +595,7 @@ def delete_game(game_id: int, db: Session = Depends(get_db), _: dict = Depends(r
     row = db.get(Game, game_id)
     if not row:
         raise HTTPException(status_code=404, detail="游戏不存在")
+    write_system_audit(db, _["user"], "delete_game", "game", str(row.id), f"删除游戏: {row.name}")
     db.delete(row)
     db.commit()
     return {"id": game_id, "deleted": True}
@@ -566,6 +610,8 @@ def create_map(payload: MapIn, db: Session = Depends(get_db), _: dict = Depends(
         raise HTTPException(status_code=400, detail="关系已存在")
     item = ChannelGameMap(**payload.model_dump())
     db.add(item)
+    db.flush()
+    write_system_audit(db, _["user"], "create_channel_game_map", "channel_game_map", str(item.id), "新增渠道游戏映射")
     db.commit()
     return {"id": item.id}
 
@@ -594,6 +640,7 @@ def update_map(map_id: int, payload: MapIn, db: Session = Depends(get_db), _: di
     row.game_id = payload.game_id
     row.revenue_share_ratio = payload.revenue_share_ratio
     row.rd_settlement_ratio = payload.rd_settlement_ratio
+    write_system_audit(db, _["user"], "update_channel_game_map", "channel_game_map", str(row.id), "编辑渠道游戏映射")
     db.commit()
     return {"id": row.id}
 
@@ -603,6 +650,7 @@ def delete_map(map_id: int, db: Session = Depends(get_db), _: dict = Depends(req
     row = db.get(ChannelGameMap, map_id)
     if not row:
         raise HTTPException(status_code=404, detail="映射不存在")
+    write_system_audit(db, _["user"], "delete_channel_game_map", "channel_game_map", str(row.id), "删除渠道游戏映射")
     db.delete(row)
     db.commit()
     return {"id": map_id, "deleted": True}
@@ -692,6 +740,7 @@ async def import_statement(
             created_by=ctx.get("user", "system"),
         )
     )
+    write_system_audit(db, ctx["user"], "import_data", "recon_task", str(task.id), f"导入数据: {file.filename or 'unknown'}")
     db.commit()
     return {
         "recon_task_id": task.id,
@@ -714,6 +763,7 @@ def confirm_recon(task_id: int, db: Session = Depends(get_db), _: dict = Depends
     if unresolved > 0:
         raise HTTPException(status_code=400, detail="仍有异常未处理")
     task.status = ReconStatus.confirmed
+    write_system_audit(db, _["user"], "confirm_recon_period", "recon_task", str(task.id), f"确认账期: {task.period}")
     db.commit()
     return {"task_id": task_id, "status": task.status}
 
@@ -851,6 +901,8 @@ def get_issue_timeline(
 def create_rule(payload: RuleIn, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance]))):
     rule = BillingRule(**payload.model_dump())
     db.add(rule)
+    db.flush()
+    write_system_audit(db, _["user"], "create_billing_rule", "billing_rule", str(rule.id), f"新增规则: {rule.name}")
     db.commit()
     return {"id": rule.id}
 
@@ -878,6 +930,7 @@ def update_rule(rule_id: int, payload: RuleIn, db: Session = Depends(get_db), _:
     row.name = payload.name
     row.bill_type = payload.bill_type
     row.default_ratio = payload.default_ratio
+    write_system_audit(db, _["user"], "update_billing_rule", "billing_rule", str(row.id), f"编辑规则: {row.name}")
     db.commit()
     return {"id": row.id}
 
@@ -952,6 +1005,14 @@ def bulk_import_rules(payload: RuleBulkIn, db: Session = Depends(get_db), _: dic
                 created_count += 1
         except Exception:
             failed_count += 1
+    write_system_audit(
+        db,
+        _["user"],
+        "bulk_import_billing_rules",
+        "billing_rule",
+        "",
+        f"规则批量导入: 新增{created_count}, 更新{updated_count}, 失败{failed_count}",
+    )
     db.commit()
     return {
         "created_count": created_count,
@@ -1071,6 +1132,7 @@ def generate_bills(
         version = (latest.version + 1) if (latest and force_new_version) else 1 if not latest else latest.version
         db.add(Bill(bill_type=BillType.rd, period=period, target_name=target, amount=amount, version=version))
         created += 1
+    write_system_audit(db, _["user"], "generate_bills", "bill", period, f"生成账单数量: {created}")
     db.commit()
     return {"created_bills": created}
 
@@ -1185,6 +1247,7 @@ def send_bill(bill_id: int, payload: BillStatusIn, db: Session = Depends(get_db)
     bill.status = payload.status
     if payload.status in (BillStatus.sent, BillStatus.acknowledged, BillStatus.disputed):
         db.add(BillDeliveryLog(bill_id=bill_id, note=payload.note))
+    write_system_audit(db, _["user"], "send_bill", "bill", str(bill_id), f"账单状态更新为: {payload.status}")
     db.commit()
     return {"bill_id": bill_id, "status": bill.status}
 
@@ -1206,6 +1269,7 @@ def create_invoice(payload: InvoiceIn, db: Session = Depends(get_db), _: dict = 
     db.add(invoice)
     db.flush()
     db.add(InvoiceMeta(invoice_id=invoice.id, remark=payload.remark))
+    write_system_audit(db, _["user"], "create_invoice", "invoice", str(invoice.id), f"新增发票: {payload.invoice_no}")
     db.commit()
     return {"id": invoice.id, "invoice_no": invoice.invoice_no}
 
@@ -1262,6 +1326,7 @@ def update_invoice(invoice_id: int, payload: InvoiceIn, db: Session = Depends(ge
         meta.remark = payload.remark
     else:
         db.add(InvoiceMeta(invoice_id=row.id, remark=payload.remark))
+    write_system_audit(db, _["user"], "update_invoice", "invoice", str(row.id), f"编辑发票: {payload.invoice_no}")
     db.commit()
     return {"id": row.id, "status": row.status}
 
@@ -1288,6 +1353,7 @@ def register_receipt(payload: ReceiptIn, db: Session = Depends(get_db), _: dict 
         bill.collection_status = CollectionStatus.partial
     else:
         bill.collection_status = CollectionStatus.pending
+    write_system_audit(db, _["user"], "create_receipt", "receipt", str(receipt.id), f"新增回款: bill={payload.bill_id}")
     db.commit()
     return {"receipt_id": receipt.id, "collection_status": bill.collection_status}
 
@@ -1350,6 +1416,7 @@ def update_receipt(receipt_id: int, payload: ReceiptIn, db: Session = Depends(ge
         bill = db.get(Bill, row.bill_id)
         if bill:
             bill.collection_status = payload.status
+    write_system_audit(db, _["user"], "update_receipt", "receipt", str(row.id), f"编辑回款: bill={row.bill_id}")
     db.commit()
     return {"id": row.id}
 
@@ -1494,7 +1561,40 @@ def finance_dashboard(db: Session = Depends(get_db), _: dict = Depends(require_r
     }
 
 
+@app.get("/audit/logs")
+def list_system_audit_logs(
+    operator: Optional[str] = None,
+    action: Optional[str] = None,
+    target_type: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin])),
+):
+    rows = db.scalars(select(SystemAuditLog).order_by(SystemAuditLog.id.desc())).all()
+    if operator:
+        rows = [x for x in rows if operator in x.operator]
+    if action:
+        rows = [x for x in rows if action in x.action]
+    if target_type:
+        rows = [x for x in rows if target_type in x.target_type]
+    if start_time:
+        start_dt = dt.datetime.fromisoformat(start_time)
+        rows = [x for x in rows if x.created_at >= start_dt]
+    if end_time:
+        end_dt = dt.datetime.fromisoformat(end_time)
+        rows = [x for x in rows if x.created_at <= end_dt]
+    total = len(rows)
+    start = (max(page, 1) - 1) * max(page_size, 1)
+    end = start + max(page_size, 1)
+    return {"items": rows[start:end], "total": total, "page": page, "page_size": page_size}
+
+
 @app.get("/audit-logs")
-def list_audit_logs(db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin]))):
-    logs = db.scalars(select(AuditLog).order_by(AuditLog.id.desc()).limit(200)).all()
-    return logs
+def list_audit_logs_compat(
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin])),
+):
+    return db.scalars(select(SystemAuditLog).order_by(SystemAuditLog.id.desc()).limit(200)).all()

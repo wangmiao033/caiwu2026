@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button, Card, Form, Input, Modal, Space, Table, message } from "antd";
 import { apiRequest } from "@/lib/api";
+import { buildExportFilename, exportRowsToXlsx } from "@/lib/export";
 
 type Row = { id: number; name: string };
 
@@ -52,6 +53,13 @@ export default function ChannelsPage() {
     });
 
   const filtered = useMemo(() => rows.filter((x) => x.name.includes(keyword)), [rows, keyword]);
+  const exportCurrent = () => {
+    exportRowsToXlsx(
+      filtered.map((x) => ({ 渠道ID: x.id, 渠道名称: x.name })),
+      buildExportFilename("channels", "xlsx")
+    );
+    message.success("导出成功");
+  };
   useEffect(() => {
     load();
   }, []);
@@ -63,6 +71,7 @@ export default function ChannelsPage() {
         <Space>
           <Input placeholder="搜索渠道" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
           <Button onClick={load}>刷新</Button>
+          <Button onClick={exportCurrent}>导出当前筛选</Button>
           <Button
             type="primary"
             onClick={() => {
