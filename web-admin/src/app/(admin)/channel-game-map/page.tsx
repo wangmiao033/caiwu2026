@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button, Card, Form, Input, InputNumber, Modal, Select, Space, Table, Tag, message } from "antd";
 import { apiRequest } from "@/lib/api";
-import { buildExportFilename, exportRowsToXlsx } from "@/lib/export";
+import { buildExportFilename, exportRowsToCsv, exportRowsToXlsx } from "@/lib/export";
 
 type Channel = { id: number; name: string };
 type Game = { id: number; name: string };
@@ -91,6 +91,19 @@ export default function ChannelGameMapPage() {
       buildExportFilename("channel_game_map", "xlsx")
     );
     message.success("导出成功");
+  };
+  const mappingTemplateRows = [
+    { channel_name: "4399", game_name: "雷鸣三国" },
+    { channel_name: "百度", game_name: "浮光幻想" },
+    { channel_name: "小米", game_name: "剑影传说" },
+  ];
+  const downloadMappingTemplateCsv = () => {
+    exportRowsToCsv(mappingTemplateRows, buildExportFilename("channel_game_map_template", "csv"));
+    message.success("CSV 模板已下载");
+  };
+  const downloadMappingTemplateXlsx = () => {
+    exportRowsToXlsx(mappingTemplateRows, buildExportFilename("channel_game_map_template", "xlsx"));
+    message.success("XLSX 模板已下载");
   };
   const parseBulk = () => {
     const channelSet = new Set(channels.map((x) => x.name));
@@ -182,6 +195,8 @@ export default function ChannelGameMapPage() {
           />
           <Button onClick={load}>刷新</Button>
           <Button onClick={exportCurrent}>导出当前筛选</Button>
+          <Button onClick={downloadMappingTemplateCsv}>下载映射模板(CSV)</Button>
+          <Button onClick={downloadMappingTemplateXlsx}>下载映射模板(XLSX)</Button>
           <Button onClick={() => setOpenBulk(true)}>批量导入</Button>
           <Button
             type="primary"
