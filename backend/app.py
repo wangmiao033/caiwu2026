@@ -292,6 +292,10 @@ class ChannelBulkCreateIn(BaseModel):
     names: list[str]
 
 
+class GameBulkCreateIn(BaseModel):
+    names: list[str]
+
+
 class GameIn(BaseModel):
     name: str
     rd_company: str
@@ -302,6 +306,15 @@ class MapIn(BaseModel):
     game_id: int
     revenue_share_ratio: Decimal = Field(default=Decimal("0.3000"))
     rd_settlement_ratio: Decimal = Field(default=Decimal("0.5000"))
+
+
+class MapBulkCreateItem(BaseModel):
+    channel_name: str
+    game_name: str
+
+
+class MapBulkCreateIn(BaseModel):
+    items: list[MapBulkCreateItem]
 
 
 class RuleIn(BaseModel):
@@ -614,6 +627,43 @@ def create_game(payload: GameIn, db: Session = Depends(get_db), ctx: dict = Depe
     return {"id": game.id, "name": game.name}
 
 
+@app.post("/games/bulk-create")
+def bulk_create_games(
+    payload: GameBulkCreateIn,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.biz, Role.ops])),
+):
+    success_count = 0
+    failed_names: list[str] = []
+    cleaned_names: list[str] = []
+    seen = set()
+    for raw in payload.names:
+        name = (raw or "").strip()
+        if not name:
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        cleaned_names.append(name)
+    exists = {x.name for x in db.scalars(select(Game).where(Game.name.in_(cleaned_names))).all()} if cleaned_names else set()
+    for name in cleaned_names:
+        if name in exists:
+            failed_names.append(name)
+            continue
+        db.add(Game(name=name, rd_company="待补充"))
+        success_count += 1
+    write_system_audit(
+        db,
+        ctx["user"],
+        "bulk_create_games",
+        "game",
+        "",
+        f"批量新增游戏: 成功{success_count}, 跳过{len(failed_names)}",
+    )
+    db.commit()
+    return {"success_count": success_count, "failed_count": len(failed_names), "failed_names": failed_names}
+
+
 @app.get("/games")
 def list_games(db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops]))):
     return db.scalars(select(Game).order_by(Game.id.desc())).all()
@@ -655,6 +705,52 @@ def create_map(payload: MapIn, db: Session = Depends(get_db), _: dict = Depends(
     write_system_audit(db, _["user"], "create_channel_game_map", "channel_game_map", str(item.id), "新增渠道游戏映射")
     db.commit()
     return {"id": item.id}
+
+
+@app.post("/channel-game-map/bulk-create")
+def bulk_create_map(
+    payload: MapBulkCreateIn,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.biz])),
+):
+    success_count = 0
+    failed_items = []
+    seen = set()
+    for raw in payload.items:
+        channel_name = (raw.channel_name or "").strip()
+        game_name = (raw.game_name or "").strip()
+        key = f"{channel_name}::{game_name}"
+        if not channel_name or not game_name:
+            failed_items.append({"channel_name": channel_name, "game_name": game_name, "reason": "格式错误"})
+            continue
+        if key in seen:
+            failed_items.append({"channel_name": channel_name, "game_name": game_name, "reason": "重复输入"})
+            continue
+        seen.add(key)
+        channel = db.scalar(select(Channel).where(Channel.name == channel_name))
+        if not channel:
+            failed_items.append({"channel_name": channel_name, "game_name": game_name, "reason": "渠道不存在"})
+            continue
+        game = db.scalar(select(Game).where(Game.name == game_name))
+        if not game:
+            failed_items.append({"channel_name": channel_name, "game_name": game_name, "reason": "游戏不存在"})
+            continue
+        exists = db.scalar(select(ChannelGameMap).where(ChannelGameMap.channel_id == channel.id, ChannelGameMap.game_id == game.id))
+        if exists:
+            failed_items.append({"channel_name": channel_name, "game_name": game_name, "reason": "映射已存在"})
+            continue
+        db.add(ChannelGameMap(channel_id=channel.id, game_id=game.id))
+        success_count += 1
+    write_system_audit(
+        db,
+        ctx["user"],
+        "bulk_create_channel_game_map",
+        "channel_game_map",
+        "",
+        f"批量新增映射: 成功{success_count}, 跳过{len(failed_items)}",
+    )
+    db.commit()
+    return {"success_count": success_count, "failed_count": len(failed_items), "failed_items": failed_items}
 
 
 @app.get("/channel-game-map")
