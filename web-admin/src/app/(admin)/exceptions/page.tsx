@@ -1,13 +1,15 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Alert, Button, Card, Col, Modal, Result, Row, Segmented, Select, Skeleton, Space, Statistic, Table, Tag, Typography, message } from "antd";
 import dayjs from "dayjs";
 import { ExceptionOverviewResponse, ExceptionRange, ExceptionStatus, ExceptionType, getExceptionsOverview, updateExceptionStatus } from "@/lib/api/exceptions";
 
 type ExceptionStatusText = "待处理" | "已忽略" | "已解决";
 type DayRange = 7 | 30 | 90;
+type TypeFilter = "all" | ExceptionType;
+type StatusFilter = "all" | ExceptionStatusText;
 
 type ExceptionRow = Record<string, unknown> & {
   id: string;
@@ -45,15 +47,35 @@ const toStatusValue = (status: ExceptionStatusText): ExceptionStatus => {
   return "pending";
 };
 
+const TYPE_WHITE_LIST: TypeFilter[] = ["all", "share", "channel", "game", "import", "overdue"];
+const STATUS_QUERY_WHITE_LIST = ["all", "pending", "ignored", "resolved"] as const;
+const RANGE_WHITE_LIST = ["7d", "30d", "90d"] as const;
+
+const parseTypeFilter = (value: string | null): TypeFilter => (value && TYPE_WHITE_LIST.includes(value as TypeFilter) ? (value as TypeFilter) : "all");
+const parseStatusFilter = (value: string | null): StatusFilter => {
+  if (value === "pending") return "待处理";
+  if (value === "ignored") return "已忽略";
+  if (value === "resolved") return "已解决";
+  return "all";
+};
+const parseRangeFilter = (value: string | null): DayRange => {
+  if (value === "7d") return 7;
+  if (value === "90d") return 90;
+  return 30;
+};
+const rangeToQuery = (value: DayRange): ExceptionRange => (value === 7 ? "7d" : value === 90 ? "90d" : "30d");
+const statusFilterToQuery = (value: StatusFilter): "all" | ExceptionStatus => {
+  if (value === "all") return "all";
+  return toStatusValue(value);
+};
+
 export default function ExceptionsPage() {
   const router = useRouter();
+  const pathname = usePathname();
   const searchParams = useSearchParams();
-  const queryType = searchParams.get("type");
-  const initialType = queryType && ["share", "channel", "game", "import", "overdue"].includes(queryType) ? (queryType as ExceptionType) : "all";
-
-  const [typeFilter, setTypeFilter] = useState<"all" | ExceptionType>(initialType);
-  const [range, setRange] = useState<DayRange>(30);
-  const [statusFilter, setStatusFilter] = useState<"all" | ExceptionStatusText>("all");
+  const [typeFilter, setTypeFilter] = useState<TypeFilter>(() => parseTypeFilter(searchParams.get("type")));
+  const [range, setRange] = useState<DayRange>(() => parseRangeFilter(searchParams.get("range")));
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>(() => parseStatusFilter(searchParams.get("status")));
   const [loading, setLoading] = useState(true);
   const [errorText, setErrorText] = useState("");
   const [overview, setOverview] = useState<ExceptionOverviewResponse | null>(null);
@@ -63,8 +85,8 @@ export default function ExceptionsPage() {
     setLoading(true);
     setErrorText("");
     try {
-      const rangeValue: ExceptionRange = range === 7 ? "7d" : range === 30 ? "30d" : "90d";
-      const statusValue = statusFilter === "all" ? "all" : toStatusValue(statusFilter);
+      const rangeValue: ExceptionRange = rangeToQuery(range);
+      const statusValue = statusFilterToQuery(statusFilter);
       const data = await getExceptionsOverview({
         range: rangeValue,
         status: statusValue,
@@ -83,6 +105,36 @@ export default function ExceptionsPage() {
   useEffect(() => {
     loadData();
   }, [range, statusFilter, typeFilter]);
+
+  useEffect(() => {
+    const nextType = parseTypeFilter(searchParams.get("type"));
+    const nextStatus = parseStatusFilter(searchParams.get("status"));
+    const nextRange = parseRangeFilter(searchParams.get("range"));
+    if (nextType !== typeFilter) setTypeFilter(nextType);
+    if (nextStatus !== statusFilter) setStatusFilter(nextStatus);
+    if (nextRange !== range) setRange(nextRange);
+  }, [searchParams]);
+
+  useEffect(() => {
+    const nextType = typeFilter;
+    const nextStatus = statusFilterToQuery(statusFilter);
+    const nextRange = rangeToQuery(range);
+    const currentType = parseTypeFilter(searchParams.get("type"));
+    const currentStatusRaw = searchParams.get("status");
+    const currentStatus = STATUS_QUERY_WHITE_LIST.includes((currentStatusRaw || "all") as (typeof STATUS_QUERY_WHITE_LIST)[number])
+      ? (currentStatusRaw as "all" | ExceptionStatus)
+      : "all";
+    const currentRangeRaw = searchParams.get("range");
+    const currentRange = RANGE_WHITE_LIST.includes((currentRangeRaw || "30d") as (typeof RANGE_WHITE_LIST)[number]) ? (currentRangeRaw as ExceptionRange) : "30d";
+    if (currentType === nextType && currentStatus === nextStatus && currentRange === nextRange) {
+      return;
+    }
+    const next = new URLSearchParams(searchParams.toString());
+    next.set("type", nextType);
+    next.set("status", nextStatus);
+    next.set("range", nextRange);
+    router.replace(`${pathname}?${next.toString()}`, { scroll: false });
+  }, [typeFilter, statusFilter, range, pathname, router, searchParams]);
 
   const goHandle = (type: ExceptionType) => {
     if (type === "share") router.push("/billing-rules");

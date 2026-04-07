@@ -87,11 +87,11 @@ export default function HomePage() {
 
   const abnormalRows: AlertRow[] = useMemo(
     () => [
-      { key: "share", type: "分成异常", count: Number(overview?.exceptions.share || 0), detail: "合计不等于100%", to: "/exceptions?type=share" },
-      { key: "channel", type: "未匹配渠道", count: Number(overview?.exceptions.channel || 0), detail: "导入记录中存在渠道未映射", to: "/exceptions?type=channel" },
-      { key: "game", type: "未匹配游戏", count: Number(overview?.exceptions.game || 0), detail: "导入记录中存在游戏未匹配版本", to: "/exceptions?type=game" },
-      { key: "importFail", type: "导入失败记录", count: Number(overview?.exceptions.import || 0), detail: "导入失败记录需复核", to: "/exceptions?type=import" },
-      { key: "overdue", type: "超期未结算", count: Number(overview?.exceptions.overdue || 0), detail: "超过约定结算周期", to: "/exceptions?type=overdue" },
+      { key: "share", type: "分成异常", count: Number(overview?.exceptions.share || 0), detail: "合计不等于100%", to: "/exceptions?type=share&status=pending&range=30d" },
+      { key: "channel", type: "未匹配渠道", count: Number(overview?.exceptions.channel || 0), detail: "导入记录中存在渠道未映射", to: "/exceptions?type=channel&status=pending&range=30d" },
+      { key: "game", type: "未匹配游戏", count: Number(overview?.exceptions.game || 0), detail: "导入记录中存在游戏未匹配版本", to: "/exceptions?type=game&status=pending&range=30d" },
+      { key: "importFail", type: "导入失败记录", count: Number(overview?.exceptions.import || 0), detail: "导入失败记录需复核", to: "/exceptions?type=import&status=pending&range=30d" },
+      { key: "overdue", type: "超期未结算", count: Number(overview?.exceptions.overdue || 0), detail: "超过约定结算周期", to: "/exceptions?type=overdue&status=pending&range=30d" },
     ],
     [overview]
   );
