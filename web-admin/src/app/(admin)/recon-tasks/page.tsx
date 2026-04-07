@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { Button, Card, Drawer, Input, Modal, Select, Space, Table, Tag, message } from "antd";
 import { apiRequest } from "@/lib/api";
 
@@ -17,6 +18,7 @@ type IssueRow = {
 };
 
 export default function ReconTasksPage() {
+  const searchParams = useSearchParams();
   const [loading, setLoading] = useState(false);
   const [rows, setRows] = useState<TaskRow[]>([]);
   const [keyword, setKeyword] = useState("");
@@ -39,7 +41,11 @@ export default function ReconTasksPage() {
 
   useEffect(() => {
     load();
-  }, []);
+    const fromTask = searchParams.get("task_id");
+    if (fromTask) {
+      setKeyword(fromTask);
+    }
+  }, [searchParams]);
 
   const filtered = useMemo(
     () =>

@@ -24,6 +24,7 @@ type RuleRow = {
   enabled: boolean;
   remark?: string;
   error_message?: string;
+  error_fields?: string[];
 };
 
 const defaultRule = (): Omit<RuleRow, "key" | "channel" | "game"> => ({
@@ -180,16 +181,53 @@ export default function BillingRulesPage() {
         enabled,
         remark: String(r["备注"] || ""),
         error_message: errs.join("；"),
+        error_fields: [],
       };
       return row;
     });
-    setImportRows(parsed);
+    try {
+      const resp = await apiRequest<{ error_details: Array<{ row_no: number; error_fields: string[]; error_message: string }> }>(
+        "/billing/rules/bulk-validate",
+        "POST",
+        {
+          rows: parsed.map((x) => ({
+            row_no: x.row_no,
+            game: x.game,
+            channel: x.channel,
+            discount_type: x.discountType,
+            channel_fee: x.channelFee,
+            tax_rate: x.taxRate,
+            rd_share: x.rdShare,
+            private_rate: x.privateRate,
+            ip_license: x.ipLicense,
+            chaofan_channel: x.chaofanChannel,
+            chaofan_rd: x.chaofanRd,
+            status: x.enabled ? "启用" : "停用",
+            remark: x.remark || "",
+          })),
+        }
+      );
+      const errorByRow = new Map(resp.error_details.map((e) => [e.row_no, e]));
+      setImportRows(
+        parsed.map((x) => {
+          const hit = errorByRow.get(x.row_no || -1);
+          if (!hit) return x;
+          return { ...x, error_message: hit.error_message, error_fields: hit.error_fields || [] };
+        })
+      );
+    } catch {
+      setImportRows(parsed);
+    }
     setImportOpen(true);
   };
 
   const importErrCount = importRows.filter((x) => !!x.error_message).length;
   const importOkCount = importRows.length - importErrCount;
   const previewRows = onlyErrors ? importRows.filter((x) => !!x.error_message) : importRows;
+  const fieldErr = (row: RuleRow, key: string) => !!row.error_fields?.includes(key);
+  const markCell = (value: unknown, row: RuleRow, key: string) => (
+    <span style={{ background: fieldErr(row, key) ? "#fff1f0" : undefined, padding: "2px 6px", borderRadius: 4 }}>{String(value ?? "")}</span>
+  );
   const exportErrors = () => {
     const errs = importRows.filter((x) => !!x.error_message);
     exportRowsToXlsx(errs as unknown as Record<string, unknown>[], "billing_rules_import_errors.xlsx");
@@ -339,12 +377,14 @@ export default function BillingRulesPage() {
           rowClassName={(r) => (r.error_message ? "row-error" : "")}
           columns={[
             { title: "Excel行号", dataIndex: "row_no", width: 100 },
-            { title: "渠道", dataIndex: "channel" },
-            { title: "游戏", dataIndex: "game" },
-            { title: "折扣类型", dataIndex: "discountType" },
-            { title: "通道费", dataIndex: "channelFee" },
-            { title: "税点", dataIndex: "taxRate" },
-            { title: "研发分成", dataIndex: "rdShare" },
+            { title: "渠道", dataIndex: "channel", render: (v, r) => markCell(v, r, "channel") },
+            { title: "游戏", dataIndex: "game", render: (v, r) => markCell(v, r, "game") },
+            { title: "折扣类型", dataIndex: "discountType", render: (v, r) => markCell(v, r, "discount_type") },
+            { title: "通道费", dataIndex: "channelFee", render: (v, r) => markCell(v, r, "channel_fee") },
+            { title: "税点", dataIndex: "taxRate", render: (v, r) => markCell(v, r, "tax_rate") },
+            { title: "研发分成", dataIndex: "rdShare", render: (v, r) => markCell(v, r, "rd_share") },
+            { title: "私点", dataIndex: "privateRate", render: (v, r) => markCell(v, r, "private_rate") },
+            { title: "状态", dataIndex: "enabled", render: (v, r) => markCell(v ? "启用" : "停用", r, "status") },
             {
               title: "异常原因",
               dataIndex: "error_message",

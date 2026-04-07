@@ -106,6 +106,8 @@ export default function ImportPage() {
   const [historyFilter, setHistoryFilter] = useState<ImportHistoryFilter>({ fileName: "", period: "", import_type: "", status: "" });
   const [historyPage, setHistoryPage] = useState(1);
   const [historyDetail, setHistoryDetail] = useState<ImportHistoryRow | null>(null);
+  const [historyIssues, setHistoryIssues] = useState<Array<{ issue_id: number; issue_type: string; message: string; status: string; row_no?: number; raw_data?: unknown }>>([]);
+  const [issueStatusFilter, setIssueStatusFilter] = useState("");
   const [loading, setLoading] = useState(false);
 
   const [extractFile, setExtractFile] = useState<File | null>(null);
@@ -186,6 +188,16 @@ export default function ImportPage() {
       setHistory(data.items || []);
       setHistoryTotal(data.total || 0);
       setHistoryPage(page);
+    } catch (e) {
+      message.error((e as Error).message);
+    }
+  };
+  const loadHistoryIssues = async (historyId: number) => {
+    try {
+      const data = await apiRequest<Array<{ issue_id: number; issue_type: string; message: string; status: string; row_no?: number; raw_data?: unknown }>>(
+        `/imports/history/${historyId}/issues`
+      );
+      setHistoryIssues(data);
     } catch (e) {
       message.error((e as Error).message);
     }
@@ -530,7 +542,14 @@ export default function ImportPage() {
                         {
                           title: "操作",
                           render: (_, r) => (
-                            <Button size="small" onClick={() => setHistoryDetail(r)}>
+                            <Button
+                              size="small"
+                              onClick={() => {
+                                setHistoryDetail(r);
+                                setIssueStatusFilter("");
+                                loadHistoryIssues(r.id);
+                              }}
+                            >
                               详情
                             </Button>
                           ),
@@ -731,28 +750,69 @@ export default function ImportPage() {
       `}</style>
       <Drawer open={!!historyDetail} title={`导入历史详情 #${historyDetail?.id || ""}`} onClose={() => setHistoryDetail(null)} width={680}>
         {historyDetail && (
-          <Table
-            pagination={false}
-            rowKey="k"
-            dataSource={[
-              { k: "导入类型", v: historyDetail.import_type },
-              { k: "账期", v: historyDetail.period },
-              { k: "文件名", v: historyDetail.file_name },
-              { k: "任务ID", v: historyDetail.task_id },
-              { k: "总行数", v: historyDetail.total_count },
-              { k: "正常行数", v: historyDetail.valid_count },
-              { k: "异常行数", v: historyDetail.invalid_count },
-              { k: "流水合计", v: historyDetail.amount_sum },
-              { k: "状态", v: historyDetail.status },
-              { k: "摘要", v: historyDetail.summary },
-              { k: "创建人", v: historyDetail.created_by },
-              { k: "创建时间", v: historyDetail.created_at },
-            ]}
-            columns={[
-              { title: "字段", dataIndex: "k", width: 180 },
-              { title: "值", dataIndex: "v" },
-            ]}
-          />
+          <Space direction="vertical" style={{ width: "100%" }} size={12}>
+            <Table
+              pagination={false}
+              rowKey="k"
+              dataSource={[
+                { k: "导入类型", v: historyDetail.import_type },
+                { k: "账期", v: historyDetail.period },
+                { k: "文件名", v: historyDetail.file_name },
+                { k: "任务ID", v: historyDetail.task_id },
+                { k: "总行数", v: historyDetail.total_count },
+                { k: "正常行数", v: historyDetail.valid_count },
+                { k: "异常行数", v: historyDetail.invalid_count },
+                { k: "流水合计", v: historyDetail.amount_sum },
+                { k: "状态", v: historyDetail.status },
+                { k: "摘要", v: historyDetail.summary },
+                { k: "创建人", v: historyDetail.created_by },
+                { k: "创建时间", v: historyDetail.created_at },
+              ]}
+              columns={[
+                { title: "字段", dataIndex: "k", width: 180 },
+                { title: "值", dataIndex: "v" },
+              ]}
+            />
+            <Card
+              size="small"
+              title="异常明细"
+              extra={
+                <Space>
+                  <Select
+                    style={{ width: 140 }}
+                    allowClear
+                    placeholder="状态筛选"
+                    options={[
+                      { label: "全部", value: "" },
+                      { label: "未处理", value: "未处理" },
+                      { label: "已处理", value: "已处理" },
+                    ]}
+                    value={issueStatusFilter || undefined}
+                    onChange={(v) => setIssueStatusFilter(v || "")}
+                  />
+                  <Button onClick={() => router.push(`/recon-tasks?task_id=${historyDetail.task_id}`)}>去核对任务</Button>
+                </Space>
+              }
+            >
+              {historyIssues.length === 0 ? (
+                <Empty description="该次导入无异常" />
+              ) : (
+                <Table
+                  size="small"
+                  rowKey="issue_id"
+                  dataSource={historyIssues.filter((x) => !issueStatusFilter || x.status === issueStatusFilter)}
+                  pagination={{ pageSize: 6 }}
+                  columns={[
+                    { title: "异常类型", dataIndex: "issue_type", width: 120 },
+                    { title: "异常描述", dataIndex: "message" },
+                    { title: "状态", dataIndex: "status", width: 100, render: (v: string) => <Tag color={v === "已处理" ? "green" : "red"}>{v}</Tag> },
+                    { title: "原始行号", dataIndex: "row_no", width: 100, render: (v: number) => v ?? "-" },
+                    { title: "原始数据", dataIndex: "raw_data", render: (v: unknown) => (v ? JSON.stringify(v) : "-") },
+                  ]}
+                />
+              )}
+            </Card>
+          </Space>
         )}
       </Drawer>
     </Space>

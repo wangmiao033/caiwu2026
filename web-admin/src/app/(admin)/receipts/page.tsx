@@ -25,6 +25,7 @@ export default function ReceiptsPage() {
   const [status, setStatus] = useState("");
   const [period, setPeriod] = useState("");
   const [keyword, setKeyword] = useState("");
+  const [exportScope, setExportScope] = useState<"filtered" | "all">("filtered");
   const [openEdit, setOpenEdit] = useState(false);
   const [editing, setEditing] = useState<ReceiptRow | null>(null);
   const [editForm] = Form.useForm();
@@ -69,9 +70,8 @@ export default function ReceiptsPage() {
     }
   };
   const filtered = useMemo(() => rows, [rows]);
-  const exportData = () => {
-    exportRowsToXlsx(
-      filtered.map((x) => ({
+  const toExportRows = (arr: ReceiptRow[]) =>
+    arr.map((x) => ({
         回款ID: x.id,
         关联账单: x.bill_id,
         目标对象: x.target_name || "",
@@ -80,9 +80,19 @@ export default function ReceiptsPage() {
         状态: x.status || "",
         备注: x.remark || "",
         创建时间: x.created_at || "",
-      })),
-      "receipts_export.xlsx"
-    );
+      }));
+  const exportData = async () => {
+    message.loading({ content: "正在导出...", key: "rec_export" });
+    try {
+      let exportRows = filtered;
+      if (exportScope === "all") {
+        exportRows = await apiRequest<ReceiptRow[]>("/receipts");
+      }
+      exportRowsToXlsx(toExportRows(exportRows), "receipts_export.xlsx");
+      message.success({ content: "导出成功", key: "rec_export" });
+    } catch (e) {
+      message.error({ content: `导出失败: ${(e as Error).message}`, key: "rec_export" });
+    }
   };
 
   return (
@@ -116,6 +126,15 @@ export default function ReceiptsPage() {
             <Input placeholder="账期筛选" value={period} onChange={(e) => setPeriod(e.target.value)} />
             <Input placeholder="关键字" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
             <Button onClick={load}>查询</Button>
+            <Select
+              style={{ width: 140 }}
+              value={exportScope}
+              onChange={(v) => setExportScope(v)}
+              options={[
+                { label: "当前筛选", value: "filtered" },
+                { label: "全部导出", value: "all" },
+              ]}
+            />
             <Button onClick={exportData}>导出</Button>
           </Space>
         }

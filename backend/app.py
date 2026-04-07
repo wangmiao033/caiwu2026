@@ -686,7 +686,19 @@ def list_recon(db: Session = Depends(get_db), _: dict = Depends(require_role([Ro
 @app.get("/recon/issues")
 def list_recon_issues(task_id: int = Query(...), db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.ops]))):
     rows = db.scalars(select(ReconIssue).where(ReconIssue.recon_task_id == task_id).order_by(ReconIssue.id.desc())).all()
-    return rows
+    return [
+        {
+            "issue_id": x.id,
+            "task_id": x.recon_task_id,
+            "issue_type": x.issue_type,
+            "message": x.detail,
+            "status": "已处理" if x.resolved else "未处理",
+            "row_no": None,
+            "raw_data": None,
+            "created_at": "",
+        }
+        for x in rows
+    ]
 
 
 @app.post("/billing/rules")
@@ -736,35 +748,43 @@ def bulk_import_rules(payload: RuleBulkIn, db: Session = Depends(get_db), _: dic
     valid_status = {"启用", "停用", "enabled", "disabled", "true", "false", "1", "0"}
     for idx, row in enumerate(payload.rows):
         try:
-            errs = []
+            err_fields = []
+            err_msgs = []
             if not row.game:
-                errs.append("游戏为空")
+                err_fields.append("game")
+                err_msgs.append("游戏为空")
             if not row.channel:
-                errs.append("渠道为空")
+                err_fields.append("channel")
+                err_msgs.append("渠道为空")
             if row.game and row.game not in game_set:
-                errs.append("游戏不存在")
+                err_fields.append("game")
+                err_msgs.append("游戏不存在")
             if row.channel and row.channel not in channel_set:
-                errs.append("渠道不存在")
+                err_fields.append("channel")
+                err_msgs.append("渠道不存在")
             if row.discount_type not in valid_discount:
-                errs.append("折扣类型非法")
+                err_fields.append("discount_type")
+                err_msgs.append("折扣类型非法")
             if row.status not in valid_status:
-                errs.append("状态非法")
-            for val, name in [
-                (row.channel_fee, "通道费格式非法"),
-                (row.tax_rate, "税点格式非法"),
-                (row.rd_share, "研发分成格式非法"),
-                (row.private_rate, "私点格式非法"),
+                err_fields.append("status")
+                err_msgs.append("状态非法")
+            for val, name, field_name in [
+                (row.channel_fee, "通道费格式非法", "channel_fee"),
+                (row.tax_rate, "税点格式非法", "tax_rate"),
+                (row.rd_share, "研发分成格式非法", "rd_share"),
+                (row.private_rate, "私点格式非法", "private_rate"),
             ]:
                 if val is None:
-                    errs.append(name)
-            if errs:
+                    err_fields.append(field_name)
+                    err_msgs.append(name)
+            if err_msgs:
                 failed_count += 1
                 error_details.append(
                     {
                         "row_no": row.row_no or idx + 2,
                         "raw_data": row.model_dump(),
-                        "error_fields": errs,
-                        "error_message": ";".join(errs),
+                        "error_fields": err_fields,
+                        "error_message": ";".join(err_msgs),
                     }
                 )
                 continue
@@ -791,6 +811,60 @@ def bulk_import_rules(payload: RuleBulkIn, db: Session = Depends(get_db), _: dic
         "created_count": created_count,
         "updated_count": updated_count,
         "failed_count": failed_count,
+        "error_details": error_details,
+    }
+
+
+@app.post("/billing/rules/bulk-validate")
+def bulk_validate_rules(payload: RuleBulkIn, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance]))):
+    channel_set = {x.name for x in db.scalars(select(Channel)).all()}
+    game_set = {x.name for x in db.scalars(select(Game)).all()}
+    valid_discount = {"无", "0.1折", "0.05折"}
+    valid_status = {"启用", "停用", "enabled", "disabled", "true", "false", "1", "0"}
+    error_details = []
+    for idx, row in enumerate(payload.rows):
+        err_fields = []
+        err_msgs = []
+        if not row.game:
+            err_fields.append("game")
+            err_msgs.append("游戏为空")
+        if not row.channel:
+            err_fields.append("channel")
+            err_msgs.append("渠道为空")
+        if row.game and row.game not in game_set:
+            err_fields.append("game")
+            err_msgs.append("游戏不存在")
+        if row.channel and row.channel not in channel_set:
+            err_fields.append("channel")
+            err_msgs.append("渠道不存在")
+        if row.discount_type not in valid_discount:
+            err_fields.append("discount_type")
+            err_msgs.append("折扣类型非法")
+        if row.status not in valid_status:
+            err_fields.append("status")
+            err_msgs.append("状态非法")
+        for val, name, field_name in [
+            (row.channel_fee, "通道费格式非法", "channel_fee"),
+            (row.tax_rate, "税点格式非法", "tax_rate"),
+            (row.rd_share, "研发分成格式非法", "rd_share"),
+            (row.private_rate, "私点格式非法", "private_rate"),
+        ]:
+            if val is None:
+                err_fields.append(field_name)
+                err_msgs.append(name)
+        if err_msgs:
+            error_details.append(
+                {
+                    "row_no": row.row_no or idx + 2,
+                    "raw_data": row.model_dump(),
+                    "error_fields": err_fields,
+                    "error_message": ";".join(err_msgs),
+                }
+            )
+    return {
+        "total_count": len(payload.rows),
+        "failed_count": len(error_details),
+        "valid_count": len(payload.rows) - len(error_details),
         "error_details": error_details,
     }
 
@@ -1076,6 +1150,27 @@ def get_import_history(history_id: int, db: Session = Depends(get_db), _: dict =
     if not row:
         raise HTTPException(status_code=404, detail="导入历史不存在")
     return row
+
+
+@app.get("/imports/history/{history_id}/issues")
+def get_import_history_issues(history_id: int, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.ops, Role.biz]))):
+    history = db.get(ImportHistory, history_id)
+    if not history:
+        raise HTTPException(status_code=404, detail="导入历史不存在")
+    rows = db.scalars(select(ReconIssue).where(ReconIssue.recon_task_id == history.task_id).order_by(ReconIssue.id.desc())).all()
+    return [
+        {
+            "issue_id": x.id,
+            "task_id": x.recon_task_id,
+            "issue_type": x.issue_type,
+            "message": x.detail,
+            "status": "已处理" if x.resolved else "未处理",
+            "row_no": None,
+            "raw_data": None,
+            "created_at": "",
+        }
+        for x in rows
+    ]
 
 
 @app.get("/dashboard/finance")
