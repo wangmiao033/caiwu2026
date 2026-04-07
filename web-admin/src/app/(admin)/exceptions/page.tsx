@@ -1,31 +1,19 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Alert, Button, Card, Col, Modal, Row, Segmented, Select, Space, Statistic, Table, Tag, Typography, message } from "antd";
+import { Alert, Button, Card, Col, Modal, Result, Row, Segmented, Select, Skeleton, Space, Statistic, Table, Tag, Typography, message } from "antd";
+import dayjs from "dayjs";
+import { ExceptionOverviewResponse, ExceptionRange, ExceptionStatus, ExceptionType, getExceptionsOverview, updateExceptionStatus } from "@/lib/api/exceptions";
 
-type ExceptionType = "share" | "channel" | "game" | "import" | "overdue";
-type ExceptionStatus = "待处理" | "已忽略" | "已解决";
+type ExceptionStatusText = "待处理" | "已忽略" | "已解决";
 type DayRange = 7 | 30 | 90;
 
-type ExceptionRow = {
+type ExceptionRow = Record<string, unknown> & {
   id: string;
   type: ExceptionType;
-  status: ExceptionStatus;
+  status: ExceptionStatusText;
   createdAt: string;
-  batch?: string;
-  channel?: string;
-  game?: string;
-  channelFee?: number;
-  taxRate?: number;
-  rdShare?: number;
-  privateRate?: number;
-  publishShare?: number;
-  totalShare?: number;
-  reason?: string;
-  failedCount?: number;
-  amount?: number;
-  overdueDays?: number;
 };
 
 const EXCEPTION_LABEL: Record<ExceptionType, string> = {
@@ -36,7 +24,7 @@ const EXCEPTION_LABEL: Record<ExceptionType, string> = {
   overdue: "超期未结算",
 };
 
-const STATUS_COLOR: Record<ExceptionStatus, string> = {
+const STATUS_COLOR: Record<ExceptionStatusText, string> = {
   待处理: "red",
   已忽略: "default",
   已解决: "green",
@@ -45,20 +33,17 @@ const STATUS_COLOR: Record<ExceptionStatus, string> = {
 const formatPercent = (ratio: number) => `${Number((ratio * 100).toFixed(4)).toString()}%`;
 const formatMoney = (value: number) => `¥${new Intl.NumberFormat("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value)}`;
 
-const mockRows: ExceptionRow[] = [
-  { id: "s1", type: "share", status: "待处理", createdAt: "2026-04-07 10:24", channel: "渠道A", game: "游戏甲", channelFee: 0.2, taxRate: 0.03, rdShare: 0.5, privateRate: 0.05, publishShare: 0.3, totalShare: 1.08 },
-  { id: "s2", type: "share", status: "待处理", createdAt: "2026-04-06 16:12", channel: "渠道B", game: "游戏乙", channelFee: 0.3, taxRate: 0.02, rdShare: 0.45, privateRate: 0.03, publishShare: 0.2, totalShare: 1.0 },
-  { id: "c1", type: "channel", status: "待处理", createdAt: "2026-04-07 09:50", batch: "IMP-20260407-01", channel: "渠道_AA", reason: "系统中未找到对应渠道映射" },
-  { id: "c2", type: "channel", status: "已忽略", createdAt: "2026-04-05 14:32", batch: "IMP-20260405-03", channel: "渠道_临时", reason: "测试导入数据" },
-  { id: "g1", type: "game", status: "待处理", createdAt: "2026-04-07 11:03", batch: "IMP-20260407-02", game: "一起来修仙005折混服", reason: "未匹配到版本" },
-  { id: "g2", type: "game", status: "已解决", createdAt: "2026-04-04 18:15", batch: "IMP-20260404-01", game: "游戏未命名", reason: "已补齐版本并重匹配" },
-  { id: "i1", type: "import", status: "待处理", createdAt: "2026-04-06 09:08", batch: "IMP-20260406-01", reason: "模板字段缺失", failedCount: 12 },
-  { id: "i2", type: "import", status: "待处理", createdAt: "2026-04-03 13:20", batch: "IMP-20260403-02", reason: "账期格式非法", failedCount: 4 },
-  { id: "o1", type: "overdue", status: "待处理", createdAt: "2026-04-07 08:22", channel: "渠道C", game: "游戏丙", amount: 216000, overdueDays: 14, batch: "2026-03" },
-  { id: "o2", type: "overdue", status: "已解决", createdAt: "2026-03-30 11:40", channel: "渠道D", game: "游戏丁", amount: 98000, overdueDays: 5, batch: "2026-03" },
-];
+const toStatusText = (status: string): ExceptionStatusText => {
+  if (status === "ignored") return "已忽略";
+  if (status === "resolved") return "已解决";
+  return "待处理";
+};
 
-const diffDays = (dateText: string) => Math.floor((Date.now() - new Date(dateText.replace(" ", "T")).getTime()) / 86400000);
+const toStatusValue = (status: ExceptionStatusText): ExceptionStatus => {
+  if (status === "已忽略") return "ignored";
+  if (status === "已解决") return "resolved";
+  return "pending";
+};
 
 export default function ExceptionsPage() {
   const router = useRouter();
@@ -68,38 +53,36 @@ export default function ExceptionsPage() {
 
   const [typeFilter, setTypeFilter] = useState<"all" | ExceptionType>(initialType);
   const [range, setRange] = useState<DayRange>(30);
-  const [statusFilter, setStatusFilter] = useState<"all" | ExceptionStatus>("all");
-  const [rows, setRows] = useState<ExceptionRow[]>(mockRows);
+  const [statusFilter, setStatusFilter] = useState<"all" | ExceptionStatusText>("all");
+  const [loading, setLoading] = useState(true);
+  const [errorText, setErrorText] = useState("");
+  const [overview, setOverview] = useState<ExceptionOverviewResponse | null>(null);
   const [detail, setDetail] = useState<ExceptionRow | null>(null);
 
-  const filteredRows = useMemo(
-    () =>
-      rows.filter((row) => {
-        if (typeFilter !== "all" && row.type !== typeFilter) return false;
-        if (statusFilter !== "all" && row.status !== statusFilter) return false;
-        return diffDays(row.createdAt) <= range;
-      }),
-    [rows, typeFilter, statusFilter, range]
-  );
-
-  const countByType = (type: ExceptionType) => filteredRows.filter((x) => x.type === type).length;
-
-  const stats = useMemo(
-    () => ({
-      total: filteredRows.length,
-      share: countByType("share"),
-      channel: countByType("channel"),
-      game: countByType("game"),
-      import: countByType("import"),
-      overdue: countByType("overdue"),
-    }),
-    [filteredRows]
-  );
-
-  const updateStatus = (id: string, status: ExceptionStatus) => {
-    setRows((prev) => prev.map((row) => (row.id === id ? { ...row, status } : row)));
-    message.success(`已更新为${status}`);
+  const loadData = async () => {
+    setLoading(true);
+    setErrorText("");
+    try {
+      const rangeValue: ExceptionRange = range === 7 ? "7d" : range === 30 ? "30d" : "90d";
+      const statusValue = statusFilter === "all" ? "all" : toStatusValue(statusFilter);
+      const data = await getExceptionsOverview({
+        range: rangeValue,
+        status: statusValue,
+        type: typeFilter,
+      });
+      setOverview(data);
+    } catch (error) {
+      const msg = (error as Error).message || "加载异常中心数据失败";
+      setErrorText(msg);
+      message.error(msg);
+    } finally {
+      setLoading(false);
+    }
   };
+
+  useEffect(() => {
+    loadData();
+  }, [range, statusFilter, typeFilter]);
 
   const goHandle = (type: ExceptionType) => {
     if (type === "share") router.push("/billing-rules");
@@ -107,6 +90,74 @@ export default function ExceptionsPage() {
     if (type === "game") router.push("/game-variants");
     if (type === "import") router.push("/import?tab=history");
     if (type === "overdue") router.push("/billing");
+  };
+
+  const shareRows: ExceptionRow[] = useMemo(
+    () =>
+      (overview?.items.share || []).map((x) => ({
+        ...(x as Record<string, unknown>),
+        id: String(x.id || ""),
+        type: "share",
+        status: toStatusText(String(x.status || "pending")),
+        createdAt: String(x.detected_at || ""),
+      })),
+    [overview]
+  );
+  const channelRows: ExceptionRow[] = useMemo(
+    () =>
+      (overview?.items.channel || []).map((x) => ({
+        ...(x as Record<string, unknown>),
+        id: String(x.id || ""),
+        type: "channel",
+        status: toStatusText(String(x.status || "pending")),
+        createdAt: String(x.detected_at || ""),
+      })),
+    [overview]
+  );
+  const gameRows: ExceptionRow[] = useMemo(
+    () =>
+      (overview?.items.game || []).map((x) => ({
+        ...(x as Record<string, unknown>),
+        id: String(x.id || ""),
+        type: "game",
+        status: toStatusText(String(x.status || "pending")),
+        createdAt: String(x.detected_at || ""),
+      })),
+    [overview]
+  );
+  const importRows: ExceptionRow[] = useMemo(
+    () =>
+      (overview?.items.import || []).map((x) => ({
+        ...(x as Record<string, unknown>),
+        id: String(x.id || ""),
+        type: "import",
+        status: toStatusText(String(x.status || "pending")),
+        createdAt: String(x.detected_at || ""),
+      })),
+    [overview]
+  );
+  const overdueRows: ExceptionRow[] = useMemo(
+    () =>
+      (overview?.items.overdue || []).map((x) => ({
+        ...(x as Record<string, unknown>),
+        id: String(x.id || ""),
+        type: "overdue",
+        status: toStatusText(String(x.status || "pending")),
+        createdAt: String(x.detected_at || ""),
+      })),
+    [overview]
+  );
+
+  const stats = overview?.summary || { total: 0, share: 0, channel: 0, game: 0, import: 0, overdue: 0 };
+
+  const handleStatusUpdate = async (row: ExceptionRow, status: ExceptionStatusText) => {
+    try {
+      await updateExceptionStatus({ type: row.type, id: row.id, status: toStatusValue(status) });
+      message.success(`已更新为${status}`);
+      await loadData();
+    } catch (error) {
+      message.error((error as Error).message || "状态更新失败");
+    }
   };
 
   const actionColumns = (type: ExceptionType) => ({
@@ -120,10 +171,10 @@ export default function ExceptionsPage() {
         <Button type="link" onClick={() => goHandle(type)}>
           去处理
         </Button>
-        <Button type="link" onClick={() => updateStatus(row.id, "已解决")}>
+        <Button type="link" onClick={() => handleStatusUpdate(row, "已解决")}>
           标记已解决
         </Button>
-        <Button type="link" onClick={() => updateStatus(row.id, "已忽略")}>
+        <Button type="link" onClick={() => handleStatusUpdate(row, "已忽略")}>
           忽略
         </Button>
       </Space>
@@ -134,21 +185,33 @@ export default function ExceptionsPage() {
     title: "状态",
     dataIndex: "status",
     width: 100,
-    render: (value: ExceptionStatus) => <Tag color={STATUS_COLOR[value]}>{value}</Tag>,
+    render: (value: ExceptionStatusText) => <Tag color={STATUS_COLOR[value]}>{value}</Tag>,
   };
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
-      <Alert type="warning" showIcon message="异常总览 + 待处理中心（Mock版）" description="当前页面仅使用前端 mock 数据，后续可直接接入后端异常中心接口。" />
+      {errorText ? (
+        <Result
+          status="warning"
+          title="异常中心加载失败"
+          subTitle={errorText}
+          extra={
+            <Button type="primary" onClick={loadData}>
+              重试
+            </Button>
+          }
+        />
+      ) : null}
+      <Alert type="info" showIcon message="异常总览 + 待处理中心（真实数据）" description="统计和明细来自后端接口，状态更新会持久化保存。" />
 
       <Card>
         <Row gutter={[16, 16]}>
-          <Col xs={24} sm={8} lg={4}><Statistic title="总异常数" value={stats.total} /></Col>
-          <Col xs={24} sm={8} lg={4}><Statistic title="分成异常数" value={stats.share} /></Col>
-          <Col xs={24} sm={8} lg={4}><Statistic title="未匹配渠道数" value={stats.channel} /></Col>
-          <Col xs={24} sm={8} lg={4}><Statistic title="未匹配游戏数" value={stats.game} /></Col>
-          <Col xs={24} sm={8} lg={4}><Statistic title="导入失败数" value={stats.import} /></Col>
-          <Col xs={24} sm={8} lg={4}><Statistic title="超期未结算数" value={stats.overdue} /></Col>
+          <Col xs={24} sm={8} lg={4}>{loading ? <Skeleton active paragraph={{ rows: 1 }} title={false} /> : <Statistic title="总异常数" value={stats.total} />}</Col>
+          <Col xs={24} sm={8} lg={4}>{loading ? <Skeleton active paragraph={{ rows: 1 }} title={false} /> : <Statistic title="分成异常数" value={stats.share} />}</Col>
+          <Col xs={24} sm={8} lg={4}>{loading ? <Skeleton active paragraph={{ rows: 1 }} title={false} /> : <Statistic title="未匹配渠道数" value={stats.channel} />}</Col>
+          <Col xs={24} sm={8} lg={4}>{loading ? <Skeleton active paragraph={{ rows: 1 }} title={false} /> : <Statistic title="未匹配游戏数" value={stats.game} />}</Col>
+          <Col xs={24} sm={8} lg={4}>{loading ? <Skeleton active paragraph={{ rows: 1 }} title={false} /> : <Statistic title="导入失败数" value={stats.import} />}</Col>
+          <Col xs={24} sm={8} lg={4}>{loading ? <Skeleton active paragraph={{ rows: 1 }} title={false} /> : <Statistic title="超期未结算数" value={stats.overdue} />}</Col>
         </Row>
       </Card>
 
@@ -195,16 +258,17 @@ export default function ExceptionsPage() {
           size="small"
           rowKey="id"
           pagination={{ pageSize: 5 }}
-          dataSource={filteredRows.filter((x) => x.type === "share")}
+          loading={loading}
+          dataSource={shareRows}
           columns={[
-            { title: "渠道", dataIndex: "channel" },
-            { title: "游戏", dataIndex: "game" },
-            { title: "通道费", dataIndex: "channelFee", render: (v: number) => formatPercent(v || 0) },
-            { title: "税点", dataIndex: "taxRate", render: (v: number) => formatPercent(v || 0) },
-            { title: "研发分成", dataIndex: "rdShare", render: (v: number) => formatPercent(v || 0) },
-            { title: "私点", dataIndex: "privateRate", render: (v: number) => formatPercent(v || 0) },
-            { title: "发行分成", dataIndex: "publishShare", render: (v: number) => formatPercent(v || 0) },
-            { title: "合计", dataIndex: "totalShare", render: (v: number) => formatPercent(v || 0) },
+            { title: "渠道", dataIndex: "channel_name" },
+            { title: "游戏", dataIndex: "game_name" },
+            { title: "通道费", dataIndex: "channel_share", render: (v: number) => formatPercent(Number(v || 0)) },
+            { title: "税点", dataIndex: "tax_rate", render: (v: number) => formatPercent(Number(v || 0)) },
+            { title: "研发分成", dataIndex: "rd_share", render: (v: number) => formatPercent(Number(v || 0)) },
+            { title: "私点", dataIndex: "private_share", render: (v: number) => formatPercent(Number(v || 0)) },
+            { title: "发行分成", dataIndex: "publisher_share", render: (v: number) => formatPercent(Number(v || 0)) },
+            { title: "合计", dataIndex: "total_ratio", render: (v: number) => formatPercent(Number(v || 0)) },
             statusColumn,
             actionColumns("share"),
           ]}
@@ -216,12 +280,13 @@ export default function ExceptionsPage() {
           size="small"
           rowKey="id"
           pagination={{ pageSize: 5 }}
-          dataSource={filteredRows.filter((x) => x.type === "channel")}
+          loading={loading}
+          dataSource={channelRows}
           columns={[
-            { title: "导入批次", dataIndex: "batch" },
-            { title: "原始渠道名", dataIndex: "channel" },
+            { title: "导入批次", dataIndex: "batch_name" },
+            { title: "原始渠道名", dataIndex: "raw_channel_name" },
             statusColumn,
-            { title: "时间", dataIndex: "createdAt" },
+            { title: "时间", dataIndex: "detected_at", render: (v: string) => (v ? dayjs(v).format("YYYY-MM-DD HH:mm") : "-") },
             actionColumns("channel"),
           ]}
         />
@@ -232,12 +297,13 @@ export default function ExceptionsPage() {
           size="small"
           rowKey="id"
           pagination={{ pageSize: 5 }}
-          dataSource={filteredRows.filter((x) => x.type === "game")}
+          loading={loading}
+          dataSource={gameRows}
           columns={[
-            { title: "导入批次", dataIndex: "batch" },
-            { title: "原始游戏名", dataIndex: "game" },
+            { title: "导入批次", dataIndex: "batch_name" },
+            { title: "原始游戏名", dataIndex: "raw_game_name" },
             statusColumn,
-            { title: "时间", dataIndex: "createdAt" },
+            { title: "时间", dataIndex: "detected_at", render: (v: string) => (v ? dayjs(v).format("YYYY-MM-DD HH:mm") : "-") },
             actionColumns("game"),
           ]}
         />
@@ -248,13 +314,14 @@ export default function ExceptionsPage() {
           size="small"
           rowKey="id"
           pagination={{ pageSize: 5 }}
-          dataSource={filteredRows.filter((x) => x.type === "import")}
+          loading={loading}
+          dataSource={importRows}
           columns={[
-            { title: "导入批次", dataIndex: "batch" },
-            { title: "失败原因", dataIndex: "reason" },
-            { title: "失败条数", dataIndex: "failedCount" },
+            { title: "导入批次", dataIndex: "batch_name" },
+            { title: "失败原因", dataIndex: "fail_reason" },
+            { title: "失败条数", dataIndex: "invalid_count" },
             statusColumn,
-            { title: "时间", dataIndex: "createdAt" },
+            { title: "时间", dataIndex: "detected_at", render: (v: string) => (v ? dayjs(v).format("YYYY-MM-DD HH:mm") : "-") },
             actionColumns("import"),
           ]}
         />
@@ -265,13 +332,14 @@ export default function ExceptionsPage() {
           size="small"
           rowKey="id"
           pagination={{ pageSize: 5 }}
-          dataSource={filteredRows.filter((x) => x.type === "overdue")}
+          loading={loading}
+          dataSource={overdueRows}
           columns={[
-            { title: "渠道", dataIndex: "channel" },
-            { title: "游戏", dataIndex: "game" },
-            { title: "账期", dataIndex: "batch" },
-            { title: "应结算金额", dataIndex: "amount", render: (v: number) => formatMoney(v || 0) },
-            { title: "逾期天数", dataIndex: "overdueDays", render: (v: number) => `${v || 0}天` },
+            { title: "渠道", dataIndex: "channel_name" },
+            { title: "游戏", dataIndex: "game_name" },
+            { title: "账期", dataIndex: "period" },
+            { title: "应结算金额", dataIndex: "bill_amount", render: (v: number) => formatMoney(Number(v || 0)) },
+            { title: "逾期天数", dataIndex: "overdue_days", render: (v: number) => `${Number(v || 0)}天` },
             statusColumn,
             actionColumns("overdue"),
           ]}
@@ -284,8 +352,8 @@ export default function ExceptionsPage() {
             <Typography.Text>异常ID：{detail.id}</Typography.Text>
             <Typography.Text>类型：{EXCEPTION_LABEL[detail.type]}</Typography.Text>
             <Typography.Text>状态：<Tag color={STATUS_COLOR[detail.status]}>{detail.status}</Tag></Typography.Text>
-            <Typography.Text>时间：{detail.createdAt}</Typography.Text>
-            <Typography.Text type="secondary">详情：{detail.reason || "请按去处理入口继续排查。"}</Typography.Text>
+            <Typography.Text>时间：{detail.createdAt ? dayjs(detail.createdAt).format("YYYY-MM-DD HH:mm:ss") : "-"}</Typography.Text>
+            <Typography.Text type="secondary">详情：{String(detail.fail_reason || detail.match_status || detail.source_module || "请按去处理入口继续排查。")}</Typography.Text>
           </Space>
         ) : null}
       </Modal>

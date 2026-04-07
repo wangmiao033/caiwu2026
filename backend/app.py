@@ -370,6 +370,23 @@ class SystemAuditLog(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now(), index=True)
 
 
+class ExceptionHandleStatus(str, enum.Enum):
+    pending = "pending"
+    ignored = "ignored"
+    resolved = "resolved"
+
+
+class ExceptionHandleRecord(Base):
+    __tablename__ = "exception_handle_records"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    exception_type: Mapped[str] = mapped_column(String(20), index=True)
+    exception_id: Mapped[str] = mapped_column(String(100), index=True)
+    status: Mapped[ExceptionHandleStatus] = mapped_column(Enum(ExceptionHandleStatus), default=ExceptionHandleStatus.pending, index=True)
+    remark: Mapped[str] = mapped_column(String(500), default="")
+    updated_by: Mapped[str] = mapped_column(String(50), default="system")
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now(), index=True)
+
+
 class ChannelIn(BaseModel):
     name: str
 
@@ -437,6 +454,13 @@ class RuleIn(BaseModel):
     name: str
     bill_type: BillType
     default_ratio: Decimal
+
+
+class ExceptionStatusPatchIn(BaseModel):
+    type: str
+    id: str
+    status: ExceptionHandleStatus
+    remark: str = ""
 
 
 class RuleBulkRow(BaseModel):
@@ -2198,6 +2222,188 @@ def _safe_ratio_change(current: Decimal, previous: Decimal) -> float:
     return float(((current - previous) / previous) * Decimal("100"))
 
 
+def _exception_status_text(status: ExceptionHandleStatus) -> str:
+    if status == ExceptionHandleStatus.ignored:
+        return "已忽略"
+    if status == ExceptionHandleStatus.resolved:
+        return "已解决"
+    return "待处理"
+
+
+def _collect_exception_data(
+    db: Session,
+    days: int,
+    status_filter: str = "all",
+    type_filter: str = "all",
+):
+    valid_types = {"share", "channel", "game", "import", "overdue"}
+    if type_filter not in {"all", *valid_types}:
+        raise HTTPException(status_code=400, detail="type 参数非法")
+    if status_filter not in {"all", "pending", "ignored", "resolved"}:
+        raise HTTPException(status_code=400, detail="status 参数非法")
+
+    cutoff_dt = dt.datetime.combine(dt.date.today() - dt.timedelta(days=days - 1), dt.time.min)
+    channels = {x.name for x in db.scalars(select(Channel.name)).all()}
+    active_variants = {x.raw_game_name for x in db.scalars(select(GameVariant.raw_game_name).where(GameVariant.status == VariantStatus.active)).all()}
+
+    status_rows = db.scalars(select(ExceptionHandleRecord)).all()
+    status_map = {(x.exception_type, x.exception_id): x for x in status_rows}
+
+    def status_for(exception_type: str, exception_id: str) -> ExceptionHandleStatus:
+        row = status_map.get((exception_type, exception_id))
+        return row.status if row else ExceptionHandleStatus.pending
+
+    def allow(exception_type: str, exception_id: str) -> bool:
+        if type_filter != "all" and exception_type != type_filter:
+            return False
+        if status_filter == "all":
+            return True
+        return status_for(exception_type, exception_id).value == status_filter
+
+    items: dict[str, list[dict]] = {"share": [], "channel": [], "game": [], "import": [], "overdue": []}
+
+    map_rows = db.scalars(select(ChannelGameMap)).all()
+    for row in map_rows:
+        total_ratio = Decimal(str(row.revenue_share_ratio or 0)) + Decimal(str(row.rd_settlement_ratio or 0))
+        if not (total_ratio > Decimal("1.0001") or total_ratio < Decimal("0.9999")):
+            continue
+        exception_id = f"share-{row.id}"
+        if not allow("share", exception_id):
+            continue
+        channel_share = Decimal(str(row.revenue_share_ratio or 0))
+        rd_share = Decimal(str(row.rd_settlement_ratio or 0))
+        tax_rate = Decimal("0")
+        private_share = Decimal("0")
+        publisher_share = Decimal("1") - channel_share - rd_share - tax_rate - private_share
+        items["share"].append(
+            {
+                "id": exception_id,
+                "type": "share",
+                "status": status_for("share", exception_id).value,
+                "detected_at": dt.datetime.now().isoformat(),
+                "updated_at": (status_map.get(("share", exception_id)).updated_at.isoformat() if status_map.get(("share", exception_id)) else None),
+                "source_module": "channel_game_map",
+                "channel_name": row.channel.name,
+                "game_name": row.game.name,
+                "channel_share": channel_share,
+                "tax_rate": tax_rate,
+                "rd_share": rd_share,
+                "private_share": private_share,
+                "publisher_share": publisher_share,
+                "total_ratio": total_ratio,
+                "status_text": _exception_status_text(status_for("share", exception_id)),
+            }
+        )
+
+    raw_rows = db.scalars(select(RawStatement).where(RawStatement.created_at >= cutoff_dt)).all()
+    for row in raw_rows:
+        if row.channel_name not in channels:
+            exception_id = f"channel-{row.id}"
+            if allow("channel", exception_id):
+                history = db.scalar(select(ImportHistory).where(ImportHistory.task_id == row.recon_task_id))
+                items["channel"].append(
+                    {
+                        "id": exception_id,
+                        "type": "channel",
+                        "status": status_for("channel", exception_id).value,
+                        "detected_at": row.created_at.isoformat() if row.created_at else dt.datetime.now().isoformat(),
+                        "updated_at": (status_map.get(("channel", exception_id)).updated_at.isoformat() if status_map.get(("channel", exception_id)) else None),
+                        "source_module": "import",
+                        "import_history_id": history.id if history else None,
+                        "batch_name": history.file_name if history else f"task-{row.recon_task_id}",
+                        "raw_channel_name": row.channel_name,
+                        "match_status": "未匹配渠道",
+                        "status_text": _exception_status_text(status_for("channel", exception_id)),
+                    }
+                )
+        if row.game_name not in active_variants:
+            exception_id = f"game-{row.id}"
+            if allow("game", exception_id):
+                history = db.scalar(select(ImportHistory).where(ImportHistory.task_id == row.recon_task_id))
+                items["game"].append(
+                    {
+                        "id": exception_id,
+                        "type": "game",
+                        "status": status_for("game", exception_id).value,
+                        "detected_at": row.created_at.isoformat() if row.created_at else dt.datetime.now().isoformat(),
+                        "updated_at": (status_map.get(("game", exception_id)).updated_at.isoformat() if status_map.get(("game", exception_id)) else None),
+                        "source_module": "import",
+                        "import_history_id": history.id if history else None,
+                        "batch_name": history.file_name if history else f"task-{row.recon_task_id}",
+                        "raw_game_name": row.game_name,
+                        "match_status": "未匹配游戏",
+                        "status_text": _exception_status_text(status_for("game", exception_id)),
+                    }
+                )
+
+    import_rows = db.scalars(
+        select(ImportHistory).where(
+            ImportHistory.created_at >= cutoff_dt,
+            (ImportHistory.invalid_count > 0) | (ImportHistory.status.like("%失败%")),
+        )
+    ).all()
+    for row in import_rows:
+        exception_id = f"import-{row.id}"
+        if not allow("import", exception_id):
+            continue
+        fail_reason = f"异常行{row.invalid_count}条，状态={row.status}"
+        items["import"].append(
+            {
+                "id": exception_id,
+                "type": "import",
+                "status": status_for("import", exception_id).value,
+                "detected_at": row.created_at.isoformat() if row.created_at else dt.datetime.now().isoformat(),
+                "updated_at": (status_map.get(("import", exception_id)).updated_at.isoformat() if status_map.get(("import", exception_id)) else None),
+                "source_module": "import_history",
+                "import_history_id": row.id,
+                "batch_name": row.file_name or f"history-{row.id}",
+                "fail_reason": fail_reason,
+                "invalid_count": int(row.invalid_count or 0),
+                "status_text": _exception_status_text(status_for("import", exception_id)),
+            }
+        )
+
+    current_period = dt.date.today().strftime("%Y-%m")
+    overdue_rows = db.scalars(
+        select(Bill).where(
+            Bill.collection_status != CollectionStatus.paid,
+            Bill.period < current_period,
+        )
+    ).all()
+    for row in overdue_rows:
+        exception_id = f"overdue-{row.id}"
+        if not allow("overdue", exception_id):
+            continue
+        period_date = dt.datetime.strptime(f"{row.period}-01", "%Y-%m-%d").date() if len(row.period) == 7 else dt.date.today()
+        overdue_days = max(0, (dt.date.today() - period_date).days)
+        items["overdue"].append(
+            {
+                "id": exception_id,
+                "type": "overdue",
+                "status": status_for("overdue", exception_id).value,
+                "detected_at": row.created_at.isoformat() if row.created_at else dt.datetime.now().isoformat(),
+                "updated_at": (status_map.get(("overdue", exception_id)).updated_at.isoformat() if status_map.get(("overdue", exception_id)) else None),
+                "source_module": "billing",
+                "channel_name": row.target_name if row.bill_type == BillType.channel else "",
+                "game_name": "",
+                "period": row.period,
+                "bill_amount": row.amount,
+                "overdue_days": overdue_days,
+                "status_text": _exception_status_text(status_for("overdue", exception_id)),
+            }
+        )
+
+    summary = {
+        "share": len(items["share"]),
+        "channel": len(items["channel"]),
+        "game": len(items["game"]),
+        "import": len(items["import"]),
+        "overdue": len(items["overdue"]),
+    }
+    summary["total"] = summary["share"] + summary["channel"] + summary["game"] + summary["import"] + summary["overdue"]
+    return {"summary": summary, "items": items}
+
+
 @app.get("/dashboard/overview")
 def dashboard_overview(
     range: str = Query(default="7d"),
@@ -2291,69 +2497,20 @@ def dashboard_overview(
         )
     )
 
-    # 异常口径与异常中心保持一致（分成异常/未匹配渠道/未匹配游戏/导入失败/超期未结算）
-    share_exception_count = int(
-        db.scalar(
-            select(func.count(ChannelGameMap.id)).where(
-                ((ChannelGameMap.revenue_share_ratio + ChannelGameMap.rd_settlement_ratio) > Decimal("1.0001"))
-                | ((ChannelGameMap.revenue_share_ratio + ChannelGameMap.rd_settlement_ratio) < Decimal("0.9999"))
-            )
-        )
-        or 0
-    )
-    cutoff_dt = dt.datetime.combine(today - dt.timedelta(days=days - 1), dt.time.min)
-    channels = {x.name for x in db.scalars(select(Channel.name)).all()}
-    active_variants = {x.raw_game_name for x in db.scalars(select(GameVariant.raw_game_name).where(GameVariant.status == VariantStatus.active)).all()}
-    recent_raw_rows = db.scalars(select(RawStatement).where(RawStatement.created_at >= cutoff_dt)).all()
-    unmatched_channel_count = sum(1 for row in recent_raw_rows if row.channel_name not in channels)
-    unmatched_game_count = sum(1 for row in recent_raw_rows if row.game_name not in active_variants)
-    import_failed_count = int(
-        db.scalar(
-            select(func.count(ImportHistory.id)).where(
-                ImportHistory.created_at >= cutoff_dt,
-                (ImportHistory.invalid_count > 0) | (ImportHistory.status.like("%失败%")),
-            )
-        )
-        or 0
-    )
-    overdue_unsettled_count = int(
-        db.scalar(
-            select(func.count(Bill.id)).where(
-                Bill.collection_status != CollectionStatus.paid,
-                Bill.period < current_period,
-            )
-        )
-        or 0
-    )
-    exception_bill_count = share_exception_count + unmatched_channel_count + unmatched_game_count + import_failed_count + overdue_unsettled_count
+    # 异常口径与异常中心同源：复用统一异常聚合函数
+    exception_data_current = _collect_exception_data(db, days=days, status_filter="all", type_filter="all")
+    exception_bill_count = int(exception_data_current["summary"]["total"])
 
-    prev_month_cutoff = dt.datetime.combine(prev_month_start, dt.time.min)
-    prev_month_next = dt.datetime.combine(month_start, dt.time.min)
-    prev_month_raw_rows = db.scalars(
-        select(RawStatement).where(RawStatement.created_at >= prev_month_cutoff, RawStatement.created_at < prev_month_next)
-    ).all()
-    prev_month_unmatched_channel = sum(1 for row in prev_month_raw_rows if row.channel_name not in channels)
-    prev_month_unmatched_game = sum(1 for row in prev_month_raw_rows if row.game_name not in active_variants)
-    prev_month_import_failed = int(
+    previous_exception_bill_count = int(
         db.scalar(
             select(func.count(ImportHistory.id)).where(
-                ImportHistory.created_at >= prev_month_cutoff,
-                ImportHistory.created_at < prev_month_next,
+                ImportHistory.created_at >= dt.datetime.combine(prev_month_start, dt.time.min),
+                ImportHistory.created_at < dt.datetime.combine(month_start, dt.time.min),
                 (ImportHistory.invalid_count > 0) | (ImportHistory.status.like("%失败%")),
             )
         )
         or 0
     )
-    prev_month_overdue = int(
-        db.scalar(
-            select(func.count(Bill.id)).where(
-                Bill.collection_status != CollectionStatus.paid,
-                Bill.period == prev_period,
-            )
-        )
-        or 0
-    )
-    previous_exception_bill_count = share_exception_count + prev_month_unmatched_channel + prev_month_unmatched_game + prev_month_import_failed + prev_month_overdue
 
     start_day = today - dt.timedelta(days=days - 1)
     date_keys = [(start_day + dt.timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days)]
@@ -2431,15 +2588,72 @@ def dashboard_overview(
         },
         "trends": trends,
         "exceptions": {
-            "total": exception_bill_count,
-            "share": share_exception_count,
-            "channel": unmatched_channel_count,
-            "game": unmatched_game_count,
-            "import": import_failed_count,
-            "overdue": overdue_unsettled_count,
+            "total": exception_data_current["summary"]["total"],
+            "share": exception_data_current["summary"]["share"],
+            "channel": exception_data_current["summary"]["channel"],
+            "game": exception_data_current["summary"]["game"],
+            "import": exception_data_current["summary"]["import"],
+            "overdue": exception_data_current["summary"]["overdue"],
         },
         "recent_activities": recent_activities,
     }
+
+
+@app.get("/exceptions/overview")
+def exceptions_overview(
+    range: str = Query(default="30d"),
+    status: str = Query(default="all"),
+    type: str = Query(default="all"),
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops])),
+):
+    range_mapping = {"7d": 7, "30d": 30, "90d": 90}
+    if range not in range_mapping:
+        raise HTTPException(status_code=400, detail="range 仅支持 7d/30d/90d")
+    payload = _collect_exception_data(db, days=range_mapping[range], status_filter=status, type_filter=type)
+    return payload
+
+
+@app.post("/exceptions/status")
+def update_exception_status(
+    payload: ExceptionStatusPatchIn,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance, Role.ops, Role.biz])),
+):
+    if payload.type not in {"share", "channel", "game", "import", "overdue"}:
+        raise HTTPException(status_code=400, detail="type 参数非法")
+    row = db.scalar(
+        select(ExceptionHandleRecord).where(
+            ExceptionHandleRecord.exception_type == payload.type,
+            ExceptionHandleRecord.exception_id == payload.id,
+        )
+    )
+    if row:
+        row.status = payload.status
+        row.remark = payload.remark
+        row.updated_by = ctx["user"]
+        row.updated_at = dt.datetime.now()
+    else:
+        db.add(
+            ExceptionHandleRecord(
+                exception_type=payload.type,
+                exception_id=payload.id,
+                status=payload.status,
+                remark=payload.remark,
+                updated_by=ctx["user"],
+                updated_at=dt.datetime.now(),
+            )
+        )
+    write_system_audit(
+        db,
+        ctx["user"],
+        "update_exception_status",
+        "exception",
+        f"{payload.type}:{payload.id}",
+        f"状态更新为 {payload.status.value}",
+    )
+    db.commit()
+    return {"ok": True}
 
 
 @app.get("/audit/logs")
