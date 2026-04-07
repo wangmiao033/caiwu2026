@@ -35,6 +35,9 @@ type PreviewRow = {
   game_name: string;
   gross_amount: string | number;
   status: "正常" | "异常";
+  project_name?: string;
+  variant_name?: string;
+  variant_match_status?: "已匹配版本" | "未匹配版本";
 };
 
 type OptionItem = {
@@ -69,6 +72,8 @@ type ImportHistoryRow = {
   summary: string;
   created_at: string;
   created_by: string;
+  matched_variant_count?: number;
+  unmatched_variant_count?: number;
   unresolved_issue_count?: number;
   resolved_issue_count?: number;
 };
@@ -94,6 +99,9 @@ type ExtractRow = {
   gross_amount_raw: string;
   gross_amount?: number;
   error?: string;
+  project_name?: string;
+  variant_name?: string;
+  variant_match_status?: "已匹配版本" | "未匹配版本";
 };
 
 export default function ImportPage() {
@@ -140,6 +148,8 @@ export default function ImportPage() {
   >([]);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [showVariantColumns, setShowVariantColumns] = useState(false);
+  const [variantInfoMap, setVariantInfoMap] = useState<Record<string, { project_name: string; variant_name: string }>>({});
 
   const [extractFile, setExtractFile] = useState<File | null>(null);
   const [extractSheets, setExtractSheets] = useState<string[]>([]);
@@ -162,6 +172,20 @@ export default function ImportPage() {
       .catch(() => {});
     apiRequest<{ channel: string; game: string }[]>("/channel-game-map")
       .then((data) => setMaps(data.map((x, idx) => ({ id: idx + 1, channel: x.channel, game: x.game }))))
+      .catch(() => {});
+    Promise.all([apiRequest<Array<{ id: number; name: string }>>("/projects"), apiRequest<Array<{ project_id: number; raw_game_name: string; variant_name: string }>>("/game-variants")])
+      .then(([projectsData, variantsData]) => {
+        const projectNameMap = new Map<number, string>();
+        projectsData.forEach((p) => projectNameMap.set(p.id, p.name));
+        const map: Record<string, { project_name: string; variant_name: string }> = {};
+        variantsData.forEach((v) => {
+          map[v.raw_game_name] = {
+            project_name: projectNameMap.get(v.project_id) || "",
+            variant_name: v.variant_name || "",
+          };
+        });
+        setVariantInfoMap(map);
+      })
       .catch(() => {});
     loadHistory(1);
     const manualDraft = localStorage.getItem("manual_import_draft");
@@ -195,12 +219,16 @@ export default function ImportPage() {
       const game = String(r.game_name || "").trim();
       const amount = r.gross_amount as string | number;
       const ok = channel && game && amount !== undefined && amount !== null && amount !== "";
+      const matched = variantInfoMap[game];
       return {
         key: idx + 1,
         channel_name: channel,
         game_name: game,
         gross_amount: amount,
         status: ok ? "正常" : "异常",
+        project_name: matched?.project_name || "",
+        variant_name: matched?.variant_name || "",
+        variant_match_status: matched ? "已匹配版本" : "未匹配版本",
       } as PreviewRow;
     });
     setPreview(data);
@@ -537,7 +565,16 @@ export default function ImportPage() {
     try {
       setLoading(true);
       const data = await apiRequestDirect<{ rows: ExtractRow[] }>("/api/recon/preview", "POST", fd, true);
-      setExtractRows(data.rows || []);
+      const enriched = (data.rows || []).map((row) => {
+        const matched = variantInfoMap[row.game_name];
+        return {
+          ...row,
+          project_name: matched?.project_name || "",
+          variant_name: matched?.variant_name || "",
+          variant_match_status: (matched ? "已匹配版本" : "未匹配版本") as "已匹配版本" | "未匹配版本",
+        };
+      });
+      setExtractRows(enriched);
       localStorage.setItem(
         "extract_mapping_draft",
         JSON.stringify({ gameCol, channelCol, amountCol, titleRow })
@@ -624,6 +661,17 @@ export default function ImportPage() {
                       { title: "渠道", dataIndex: "channel_name" },
                       { title: "游戏", dataIndex: "game_name" },
                       { title: "流水", dataIndex: "gross_amount" },
+                      ...(showVariantColumns
+                        ? [
+                            { title: "项目", dataIndex: "project_name", render: (v: string) => v || "-" },
+                            { title: "版本", dataIndex: "variant_name", render: (v: string) => v || "-" },
+                            {
+                              title: "版本匹配状态",
+                              dataIndex: "variant_match_status",
+                              render: (v: string) => <Tag color={v === "已匹配版本" ? "green" : "orange"}>{v || "未匹配版本"}</Tag>,
+                            },
+                          ]
+                        : []),
                       {
                         title: "状态",
                         dataIndex: "status",
@@ -633,6 +681,9 @@ export default function ImportPage() {
                   />
                   <Card title="导入历史" size="small">
                     <Space style={{ marginBottom: 8 }} wrap>
+                      <Button size="small" onClick={() => setShowVariantColumns((v) => !v)}>
+                        {showVariantColumns ? "隐藏版本信息列" : "显示版本信息列"}
+                      </Button>
                       <Input
                         placeholder="关键字"
                         value={historyFilter.fileName}
@@ -688,6 +739,8 @@ export default function ImportPage() {
                         { title: "总行数", dataIndex: "total_count" },
                         { title: "正常行数", dataIndex: "valid_count" },
                         { title: "异常行数", dataIndex: "invalid_count" },
+                        { title: "已匹配版本", dataIndex: "matched_variant_count", render: (v: number) => v ?? 0 },
+                        { title: "未匹配版本", dataIndex: "unmatched_variant_count", render: (v: number) => v ?? 0 },
                         { title: "流水合计", dataIndex: "amount_sum" },
                         {
                           title: "状态",
@@ -919,6 +972,8 @@ export default function ImportPage() {
                 { k: "总行数", v: historyDetail.total_count },
                 { k: "正常行数", v: historyDetail.valid_count },
                 { k: "异常行数", v: historyDetail.invalid_count },
+                { k: "已匹配版本数", v: historyDetail.matched_variant_count ?? 0 },
+                { k: "未匹配版本数", v: historyDetail.unmatched_variant_count ?? 0 },
                 { k: "已处理异常数", v: historyDetail.resolved_issue_count ?? 0 },
                 { k: "未处理异常数", v: historyDetail.unresolved_issue_count ?? 0 },
                 { k: "流水合计", v: historyDetail.amount_sum },
@@ -932,6 +987,7 @@ export default function ImportPage() {
                 { title: "值", dataIndex: "v" },
               ]}
             />
+            {(historyDetail.unmatched_variant_count ?? 0) > 0 && <Tag color="orange">部分数据未匹配到版本，后续统计可能不完整</Tag>}
             <Card
               size="small"
               title="异常明细"

@@ -221,6 +221,15 @@ class RawStatement(Base):
     game_name: Mapped[str] = mapped_column(String(150))
     period: Mapped[str] = mapped_column(String(20), index=True)
     gross_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    project_id: Mapped[Optional[int]] = mapped_column(index=True, nullable=True)
+    project_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    variant_id: Mapped[Optional[int]] = mapped_column(index=True, nullable=True)
+    variant_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    rd_company: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    publish_company: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    rd_share_percent: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    publish_share_percent: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    variant_match_status: Mapped[str] = mapped_column(String(20), default="未匹配版本")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
 
 
@@ -265,6 +274,8 @@ class ImportHistory(Base):
     invalid_count: Mapped[int] = mapped_column(default=0)
     amount_sum: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
     status: Mapped[str] = mapped_column(String(30), default="待确认")
+    matched_variant_count: Mapped[int] = mapped_column(default=0)
+    unmatched_variant_count: Mapped[int] = mapped_column(default=0)
     summary: Mapped[str] = mapped_column(String(500), default="")
     created_by: Mapped[str] = mapped_column(String(50), default="system")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
@@ -537,6 +548,8 @@ class ImportHistoryOut(Out):
     summary: str
     created_by: str
     created_at: dt.datetime
+    matched_variant_count: int = 0
+    unmatched_variant_count: int = 0
     unresolved_issue_count: int = 0
     resolved_issue_count: int = 0
 
@@ -645,6 +658,46 @@ def ensure_game_variant_settlement_columns():
             conn.execute(text(stmt))
 
 
+def ensure_import_enrichment_columns():
+    inspector = inspect(engine)
+    if "raw_statements" in inspector.get_table_names():
+        existing = {c["name"] for c in inspector.get_columns("raw_statements")}
+        statements: list[str] = []
+        if "project_id" not in existing:
+            statements.append("ALTER TABLE raw_statements ADD COLUMN project_id INTEGER")
+        if "project_name" not in existing:
+            statements.append("ALTER TABLE raw_statements ADD COLUMN project_name VARCHAR(150)")
+        if "variant_id" not in existing:
+            statements.append("ALTER TABLE raw_statements ADD COLUMN variant_id INTEGER")
+        if "variant_name" not in existing:
+            statements.append("ALTER TABLE raw_statements ADD COLUMN variant_name VARCHAR(100)")
+        if "rd_company" not in existing:
+            statements.append("ALTER TABLE raw_statements ADD COLUMN rd_company VARCHAR(200)")
+        if "publish_company" not in existing:
+            statements.append("ALTER TABLE raw_statements ADD COLUMN publish_company VARCHAR(200)")
+        if "rd_share_percent" not in existing:
+            statements.append("ALTER TABLE raw_statements ADD COLUMN rd_share_percent NUMERIC(6,2)")
+        if "publish_share_percent" not in existing:
+            statements.append("ALTER TABLE raw_statements ADD COLUMN publish_share_percent NUMERIC(6,2)")
+        if "variant_match_status" not in existing:
+            statements.append("ALTER TABLE raw_statements ADD COLUMN variant_match_status VARCHAR(20) DEFAULT '未匹配版本'")
+        if statements:
+            with engine.begin() as conn:
+                for stmt in statements:
+                    conn.execute(text(stmt))
+    if "import_history" in inspector.get_table_names():
+        existing = {c["name"] for c in inspector.get_columns("import_history")}
+        statements: list[str] = []
+        if "matched_variant_count" not in existing:
+            statements.append("ALTER TABLE import_history ADD COLUMN matched_variant_count INTEGER DEFAULT 0")
+        if "unmatched_variant_count" not in existing:
+            statements.append("ALTER TABLE import_history ADD COLUMN unmatched_variant_count INTEGER DEFAULT 0")
+        if statements:
+            with engine.begin() as conn:
+                for stmt in statements:
+                    conn.execute(text(stmt))
+
+
 def normalize_variant_shares(payload: GameVariantIn) -> tuple[Optional[Decimal], Optional[Decimal]]:
     rd_share = payload.rd_share_percent
     publish_share = payload.publish_share_percent
@@ -664,6 +717,7 @@ app = FastAPI(title="内部对账系统", version="1.0.0")
 def startup():
     Base.metadata.create_all(bind=engine)
     ensure_game_variant_settlement_columns()
+    ensure_import_enrichment_columns()
     with SessionLocal() as db:
         create_default_data(db)
 
@@ -1139,13 +1193,23 @@ async def import_statement(
     db.add(task)
     db.flush()
     issue_count = 0
+    matched_variant_count = 0
+    unmatched_variant_count = 0
     total_count = int(len(df.index))
     amount_sum = Decimal("0")
+    projects = {x.id: x for x in db.scalars(select(Project)).all()}
+    variants = {x.raw_game_name: x for x in db.scalars(select(GameVariant)).all()}
     for _, row in df.iterrows():
         channel_name = str(row["channel_name"]).strip()
         game_name = str(row["game_name"]).strip()
         gross_amount = Decimal(str(row["gross_amount"]))
         amount_sum += gross_amount
+        matched_variant = variants.get(game_name)
+        matched_project = projects.get(matched_variant.project_id) if matched_variant else None
+        if matched_variant:
+            matched_variant_count += 1
+        else:
+            unmatched_variant_count += 1
         db.add(
             RawStatement(
                 recon_task_id=task.id,
@@ -1153,6 +1217,15 @@ async def import_statement(
                 game_name=game_name,
                 period=period,
                 gross_amount=gross_amount,
+                project_id=matched_project.id if matched_project else None,
+                project_name=matched_project.name if matched_project else None,
+                variant_id=matched_variant.id if matched_variant else None,
+                variant_name=matched_variant.variant_name if matched_variant else None,
+                rd_company=matched_variant.rd_company if matched_variant else None,
+                publish_company=matched_variant.publish_company if matched_variant else None,
+                rd_share_percent=matched_variant.rd_share_percent if matched_variant else None,
+                publish_share_percent=matched_variant.publish_share_percent if matched_variant else None,
+                variant_match_status="已匹配版本" if matched_variant else "未匹配版本",
             )
         )
         channel = db.scalar(select(Channel).where(Channel.name == channel_name))
@@ -1193,6 +1266,8 @@ async def import_statement(
             invalid_count=issue_count,
             amount_sum=amount_sum,
             status="异常待处理" if issue_count > 0 else "待确认",
+            matched_variant_count=matched_variant_count,
+            unmatched_variant_count=unmatched_variant_count,
             summary=summary_text,
             created_by=ctx.get("user", "system"),
         )
@@ -1207,6 +1282,8 @@ async def import_statement(
             "valid_count": valid_count,
             "invalid_count": issue_count,
             "amount_sum": amount_sum,
+            "matched_variant_count": matched_variant_count,
+            "unmatched_variant_count": unmatched_variant_count,
         },
     }
 
