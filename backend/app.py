@@ -102,6 +102,34 @@ class CollectionStatus(str, enum.Enum):
     paid = "已回款"
 
 
+class ProjectStatus(str, enum.Enum):
+    active = "active"
+    paused = "paused"
+
+
+class VariantStatus(str, enum.Enum):
+    active = "active"
+    paused = "paused"
+
+
+class DiscountType(str, enum.Enum):
+    none = "none"
+    rate_01 = "0.1"
+    rate_005 = "0.05"
+
+
+class VersionType(str, enum.Enum):
+    regular = "常规版"
+    joint = "联运版"
+    self_operated = "自运营版"
+    discount = "折扣版"
+
+
+class ServerType(str, enum.Enum):
+    mixed = "混服"
+    dedicated = "专服"
+
+
 class User(Base):
     __tablename__ = "users"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -133,6 +161,30 @@ class Game(Base):
     name: Mapped[str] = mapped_column(String(150), unique=True, index=True)
     rd_company: Mapped[str] = mapped_column(String(150))
     active: Mapped[bool] = mapped_column(default=True)
+
+
+class Project(Base):
+    __tablename__ = "projects"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(150), unique=True, index=True)
+    status: Mapped[ProjectStatus] = mapped_column(Enum(ProjectStatus), default=ProjectStatus.active)
+    remark: Mapped[str] = mapped_column(String(500), default="")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
+
+
+class GameVariant(Base):
+    __tablename__ = "game_variants"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
+    variant_name: Mapped[str] = mapped_column(String(100))
+    raw_game_name: Mapped[str] = mapped_column(String(200), unique=True, index=True)
+    discount_type: Mapped[DiscountType] = mapped_column(Enum(DiscountType), default=DiscountType.none)
+    version_type: Mapped[VersionType] = mapped_column(Enum(VersionType), default=VersionType.regular)
+    server_type: Mapped[ServerType] = mapped_column(Enum(ServerType), default=ServerType.mixed)
+    status: Mapped[VariantStatus] = mapped_column(Enum(VariantStatus), default=VariantStatus.active)
+    remark: Mapped[str] = mapped_column(String(500), default="")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
+    project: Mapped[Project] = relationship()
 
 
 class ChannelGameMap(Base):
@@ -315,6 +367,31 @@ class GameBulkCreateIn(BaseModel):
 class GameIn(BaseModel):
     name: str
     rd_company: str
+
+
+class ProjectIn(BaseModel):
+    name: str
+    status: ProjectStatus = ProjectStatus.active
+    remark: str = ""
+
+
+class ProjectStatusPatch(BaseModel):
+    status: ProjectStatus
+
+
+class GameVariantIn(BaseModel):
+    project_id: int
+    variant_name: str
+    raw_game_name: str
+    discount_type: DiscountType = DiscountType.none
+    version_type: VersionType = VersionType.regular
+    server_type: ServerType = ServerType.mixed
+    status: VariantStatus = VariantStatus.active
+    remark: str = ""
+
+
+class VariantStatusPatch(BaseModel):
+    status: VariantStatus
 
 
 class MapIn(BaseModel):
@@ -706,6 +783,155 @@ def delete_game(game_id: int, db: Session = Depends(get_db), _: dict = Depends(r
     db.delete(row)
     db.commit()
     return {"id": game_id, "deleted": True}
+
+
+@app.get("/projects")
+def list_projects(db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops]))):
+    return db.scalars(select(Project).order_by(Project.id.desc())).all()
+
+
+@app.post("/projects")
+def create_project(payload: ProjectIn, db: Session = Depends(get_db), ctx: dict = Depends(require_role([Role.admin, Role.biz, Role.ops]))):
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="项目名称不能为空")
+    dup = db.scalar(select(Project).where(Project.name == name))
+    if dup:
+        raise HTTPException(status_code=400, detail="项目名称已存在")
+    row = Project(name=name, status=payload.status, remark=(payload.remark or "").strip())
+    db.add(row)
+    db.flush()
+    write_system_audit(db, ctx["user"], "create_project", "project", str(row.id), f"新增项目: {name}")
+    db.commit()
+    return row
+
+
+@app.put("/projects/{project_id}")
+def update_project(
+    project_id: int,
+    payload: ProjectIn,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.biz])),
+):
+    row = db.get(Project, project_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="项目名称不能为空")
+    dup = db.scalar(select(Project).where(Project.name == name, Project.id != project_id))
+    if dup:
+        raise HTTPException(status_code=400, detail="项目名称已存在")
+    row.name = name
+    row.status = payload.status
+    row.remark = (payload.remark or "").strip()
+    write_system_audit(db, ctx["user"], "update_project", "project", str(row.id), f"编辑项目: {name}")
+    db.commit()
+    return row
+
+
+@app.patch("/projects/{project_id}/status")
+def patch_project_status(
+    project_id: int,
+    payload: ProjectStatusPatch,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.biz])),
+):
+    row = db.get(Project, project_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    row.status = payload.status
+    write_system_audit(db, ctx["user"], "update_project_status", "project", str(row.id), f"项目状态: {payload.status.value}")
+    db.commit()
+    return row
+
+
+@app.get("/game-variants")
+def list_game_variants(
+    project_id: Optional[int] = Query(default=None),
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops])),
+):
+    stmt = select(GameVariant).order_by(GameVariant.id.desc())
+    if project_id is not None:
+        stmt = stmt.where(GameVariant.project_id == project_id)
+    return db.scalars(stmt).all()
+
+
+@app.post("/game-variants")
+def create_game_variant(payload: GameVariantIn, db: Session = Depends(get_db), ctx: dict = Depends(require_role([Role.admin, Role.biz, Role.ops]))):
+    if not db.get(Project, payload.project_id):
+        raise HTTPException(status_code=400, detail="所属项目不存在")
+    raw = (payload.raw_game_name or "").strip()
+    variant = (payload.variant_name or "").strip()
+    if not raw or not variant:
+        raise HTTPException(status_code=400, detail="版本名称与原始游戏名不能为空")
+    dup = db.scalar(select(GameVariant).where(GameVariant.raw_game_name == raw))
+    if dup:
+        raise HTTPException(status_code=400, detail="原始游戏名已存在")
+    row = GameVariant(
+        project_id=payload.project_id,
+        variant_name=variant,
+        raw_game_name=raw,
+        discount_type=payload.discount_type,
+        version_type=payload.version_type,
+        server_type=payload.server_type,
+        status=payload.status,
+        remark=(payload.remark or "").strip(),
+    )
+    db.add(row)
+    db.flush()
+    write_system_audit(db, ctx["user"], "create_game_variant", "game_variant", str(row.id), f"新增版本: {variant} / {raw}")
+    db.commit()
+    return row
+
+
+@app.put("/game-variants/{variant_id}")
+def update_game_variant(
+    variant_id: int,
+    payload: GameVariantIn,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.biz])),
+):
+    row = db.get(GameVariant, variant_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="版本不存在")
+    if not db.get(Project, payload.project_id):
+        raise HTTPException(status_code=400, detail="所属项目不存在")
+    raw = (payload.raw_game_name or "").strip()
+    variant = (payload.variant_name or "").strip()
+    if not raw or not variant:
+        raise HTTPException(status_code=400, detail="版本名称与原始游戏名不能为空")
+    dup = db.scalar(select(GameVariant).where(GameVariant.raw_game_name == raw, GameVariant.id != variant_id))
+    if dup:
+        raise HTTPException(status_code=400, detail="原始游戏名已存在")
+    row.project_id = payload.project_id
+    row.variant_name = variant
+    row.raw_game_name = raw
+    row.discount_type = payload.discount_type
+    row.version_type = payload.version_type
+    row.server_type = payload.server_type
+    row.status = payload.status
+    row.remark = (payload.remark or "").strip()
+    write_system_audit(db, ctx["user"], "update_game_variant", "game_variant", str(row.id), f"编辑版本: {variant}")
+    db.commit()
+    return row
+
+
+@app.patch("/game-variants/{variant_id}/status")
+def patch_variant_status(
+    variant_id: int,
+    payload: VariantStatusPatch,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.biz])),
+):
+    row = db.get(GameVariant, variant_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="版本不存在")
+    row.status = payload.status
+    write_system_audit(db, ctx["user"], "update_game_variant_status", "game_variant", str(row.id), f"版本状态: {payload.status.value}")
+    db.commit()
+    return row
 
 
 @app.post("/channel-game-map")

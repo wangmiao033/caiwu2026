@@ -4,12 +4,14 @@ import { useMemo } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
   AppstoreOutlined,
+  ApartmentOutlined,
   AuditOutlined,
   CheckCircleOutlined,
   ClusterOutlined,
   DollarOutlined,
   FileExcelOutlined,
   FileTextOutlined,
+  FolderOpenOutlined,
   GiftOutlined,
   HomeOutlined,
   LogoutOutlined,
@@ -26,6 +28,8 @@ const menuItems = [
   { key: "/home", icon: <HomeOutlined />, label: "首页看板" },
   { key: "/channels", icon: <ShopOutlined />, label: "渠道管理" },
   { key: "/games", icon: <GiftOutlined />, label: "游戏管理" },
+  { key: "/projects", icon: <FolderOpenOutlined />, label: "项目管理" },
+  { key: "/game-variants", icon: <ApartmentOutlined />, label: "版本管理" },
   { key: "/channel-game-map", icon: <ClusterOutlined />, label: "渠道游戏映射" },
   { key: "/import", icon: <FileExcelOutlined />, label: "Excel导入" },
   { key: "/recon-tasks", icon: <CheckCircleOutlined />, label: "核对任务" },

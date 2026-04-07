@@ -1,6 +1,6 @@
 "use client";
 
-type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";
+type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 function getAuthHeaders(isFormData: boolean): Record<string, string> {
   const token = typeof window !== "undefined" ? localStorage.getItem("access_token") || "" : "";
