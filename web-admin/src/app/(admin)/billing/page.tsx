@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button, Card, Descriptions, Drawer, Empty, Input, Modal, Select, Space, Switch, Table, Tag, Tooltip, message } from "antd";
 import { apiRequest } from "@/lib/api";
@@ -46,21 +46,37 @@ type BillDetail = BillRow & {
   };
 };
 
+function getCurrentPeriod(): string {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+}
+
+function parseBool(raw: string | null, defaultValue: boolean): boolean {
+  if (raw === null) return defaultValue;
+  if (raw === "1" || raw === "true") return true;
+  if (raw === "0" || raw === "false") return false;
+  return defaultValue;
+}
+
 export default function BillingPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [period, setPeriod] = useState("2026-03");
+  const [period, setPeriod] = useState(searchParams.get("period") || getCurrentPeriod());
   const [list, setList] = useState<BillRow[]>([]);
-  const [filterType, setFilterType] = useState<string>("");
-  const [filterText, setFilterText] = useState("");
+  const [filterType, setFilterType] = useState<string>(searchParams.get("type") || "");
+  const [filterText, setFilterText] = useState(searchParams.get("keyword") || "");
   const [sendingId, setSendingId] = useState<number | null>(null);
   const [detail, setDetail] = useState<BillDetail | null>(null);
-  const [showTrial, setShowTrial] = useState(false);
-  const [reconMode, setReconMode] = useState(true);
-  const [pageSize, setPageSize] = useState(100);
+  const [showTrial, setShowTrial] = useState(parseBool(searchParams.get("show_trial"), false));
+  const [reconMode, setReconMode] = useState(parseBool(searchParams.get("recon_mode"), true));
+  const [pageSize, setPageSize] = useState(Number(searchParams.get("page_size") || 100));
+  const [currentPage, setCurrentPage] = useState(Number(searchParams.get("page") || 1));
   const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
   const [rules, setRules] = useState<BillingRule[]>([]);
   const [exportFormat, setExportFormat] = useState<"xlsx" | "csv">("xlsx");
+  const initedRef = useRef(false);
 
   useEffect(() => {
     const cache = localStorage.getItem("billing_rules_local");
@@ -69,14 +85,6 @@ export default function BillingPage() {
       setRules(JSON.parse(cache));
     } catch {}
   }, []);
-  useEffect(() => {
-    const q = searchParams.get("bill_id") || searchParams.get("keyword") || "";
-    if (q) {
-      setFilterText(q);
-      loadBills();
-    }
-  }, [searchParams]);
-
   const generate = async () => {
     Modal.confirm({
       title: "确认生成账单",
@@ -93,11 +101,18 @@ export default function BillingPage() {
     });
   };
 
-  const loadBills = async () => {
+  const loadBills = async (opts?: { period?: string; billIdToOpen?: number | null }) => {
     try {
-      const query = filterType ? `/billing/bills?bill_type=${filterType}` : "/billing/bills";
+      const nextPeriod = (opts?.period ?? period ?? "").trim();
+      const q = new URLSearchParams();
+      if (nextPeriod) q.set("period", nextPeriod);
+      if (filterType) q.set("bill_type", filterType);
+      const query = `/billing/bills${q.toString() ? `?${q.toString()}` : ""}`;
       const data = await apiRequest<BillRow[]>(query);
       setList(data);
+      if (opts?.billIdToOpen) {
+        await openDetail(opts.billIdToOpen);
+      }
     } catch (e) {
       message.error((e as Error).message);
     }
@@ -128,6 +143,10 @@ export default function BillingPage() {
     } catch (e) {
       message.error((e as Error).message);
     }
+  };
+
+  const openDetailInNewTab = (id: number) => {
+    window.open(`/billing?bill_id=${id}&period=${encodeURIComponent(period)}`, "_blank", "noopener,noreferrer");
   };
 
   const filtered = useMemo(
@@ -197,6 +216,27 @@ export default function BillingPage() {
     message.info("请在回款页面逐条登记回款，登记后账单会自动变为已回款/部分回款");
   };
 
+  useEffect(() => {
+    const billId = Number(searchParams.get("bill_id") || 0);
+    loadBills({ period, billIdToOpen: billId > 0 ? billId : null });
+    initedRef.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!initedRef.current) return;
+    const params = new URLSearchParams();
+    if (period) params.set("period", period);
+    if (filterText) params.set("keyword", filterText);
+    if (filterType) params.set("type", filterType);
+    if (!reconMode) params.set("recon_mode", "0");
+    if (showTrial) params.set("show_trial", "1");
+    if (pageSize !== 100) params.set("page_size", String(pageSize));
+    if (currentPage !== 1) params.set("page", String(currentPage));
+    if (detail?.id) params.set("bill_id", String(detail.id));
+    router.replace(`/billing${params.toString() ? `?${params.toString()}` : ""}`);
+  }, [period, filterText, filterType, reconMode, showTrial, pageSize, currentPage, detail?.id, router]);
+
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
       <Card title="账单生成">
@@ -223,7 +263,7 @@ export default function BillingPage() {
               value={filterType || undefined}
               onChange={(v) => setFilterType(v || "")}
             />
-            <Button onClick={loadBills}>查询</Button>
+            <Button onClick={() => loadBills()}>查询</Button>
             <Select
               style={{ width: 100 }}
               value={exportFormat}
@@ -272,7 +312,12 @@ export default function BillingPage() {
             onChange: (keys) => setSelectedRowKeys(keys.map((k) => String(k))),
           }}
           rowClassName={() => (reconMode ? "recon-row-compact" : "")}
-          pagination={{ pageSize, showSizeChanger: false }}
+          pagination={{
+            current: currentPage,
+            pageSize,
+            showSizeChanger: false,
+            onChange: (page) => setCurrentPage(page),
+          }}
           locale={{ emptyText: <Empty description="暂无账单数据，请先生成或调整筛选条件" /> }}
           columns={
             reconMode
@@ -290,9 +335,14 @@ export default function BillingPage() {
                   {
                     title: "操作",
                     render: (_, r: BillRow) => (
-                      <Button size="small" onClick={() => openDetail(r.id)}>
-                        查看详情
-                      </Button>
+                      <Space>
+                        <Button size="small" onClick={() => openDetail(r.id)}>
+                          查看详情
+                        </Button>
+                        <Button size="small" onClick={() => openDetailInNewTab(r.id)}>
+                          新标签打开
+                        </Button>
+                      </Space>
                     ),
                   },
                 ]
@@ -339,6 +389,9 @@ export default function BillingPage() {
                       <Space>
                         <Button size="small" onClick={() => openDetail(r.id)}>
                           查看详情
+                        </Button>
+                        <Button size="small" onClick={() => openDetailInNewTab(r.id)}>
+                          新标签打开
                         </Button>
                         <Button size="small" loading={sendingId === r.id} onClick={() => sendBill(r.id, "已发送")}>
                           发送
