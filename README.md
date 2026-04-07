@@ -72,3 +72,6 @@ npm run dev
 - `docs/deploy-vercel.md`
 - `docs/usage.md`
 - `docs/import-template.md`
+- `docs/finance-user-guide.md`（财务使用手册）
+- `docs/admin-user-guide.md`（管理员使用手册）
+- `docs/db-backup-restore.md`（数据库备份与恢复）

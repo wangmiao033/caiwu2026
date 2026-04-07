@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { Button, Card, Drawer, Input, Modal, Select, Space, Table, Tag, message } from "antd";
+import { Button, Card, Drawer, Empty, Input, Modal, Select, Space, Table, Tag, message } from "antd";
 import { apiRequest } from "@/lib/api";
 
 type TaskRow = {
@@ -60,7 +60,7 @@ export default function ReconTasksPage() {
   const confirmTask = (id: number) => {
     Modal.confirm({
       title: "确认账期",
-      content: `确认任务 ${id} 吗？确认前请确保异常均已处理。`,
+      content: `确认任务 ${id} 后将进入后续账单流程，建议先完成异常处理并复核后再确认。`,
       onOk: async () => {
         try {
           await apiRequest(`/recon/${id}/confirm`, "POST");
@@ -119,6 +119,7 @@ export default function ReconTasksPage() {
         loading={loading}
         dataSource={filtered}
         pagination={{ pageSize: 10 }}
+        locale={{ emptyText: <Empty description="暂无核对任务" /> }}
         columns={[
           { title: "任务ID", dataIndex: "id" },
           { title: "账期", dataIndex: "period" },
@@ -150,6 +151,7 @@ export default function ReconTasksPage() {
           rowKey="id"
           dataSource={issues}
           pagination={{ pageSize: 8 }}
+          locale={{ emptyText: <Empty description="该任务暂无异常明细" /> }}
           columns={[
             { title: "异常ID", dataIndex: "id", width: 90 },
             { title: "类型", dataIndex: "issue_type", width: 130 },

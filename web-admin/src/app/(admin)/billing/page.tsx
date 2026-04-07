@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Button, Card, Descriptions, Drawer, Input, Modal, Select, Space, Switch, Table, Tag, message } from "antd";
+import { Button, Card, Descriptions, Drawer, Empty, Input, Modal, Select, Space, Switch, Table, Tag, message } from "antd";
 import { apiRequest } from "@/lib/api";
 import { BillingRule, calcTrialResult, matchRuleForBill } from "@/lib/billingTrial";
 import { buildExportFilename, exportRowsToCsv, exportRowsToXlsx } from "@/lib/export";
@@ -78,7 +78,7 @@ export default function BillingPage() {
   const generate = async () => {
     Modal.confirm({
       title: "确认生成账单",
-      content: `将按账期 ${period} 生成账单，是否继续？`,
+      content: `将按账期 ${period} 生成账单。该操作会产生新账单记录，请确认账期与规则配置无误。`,
       onOk: async () => {
         try {
           const data = await apiRequest<Record<string, unknown>>(`/billing/generate?period=${encodeURIComponent(period)}&force_new_version=false`, "POST");
@@ -104,7 +104,7 @@ export default function BillingPage() {
   const sendBill = async (id: number, status: string) => {
     Modal.confirm({
       title: "确认发送账单",
-      content: `确认将账单 ${id} 更新为 ${status} 吗？`,
+      content: `将账单 ${id} 更新为 ${status}。该操作会进入对外流转，请确认后执行。`,
       onOk: async () => {
         setSendingId(id);
         try {
@@ -149,6 +149,7 @@ export default function BillingPage() {
     return calcTrialResult(baseGross, rule);
   }, [detail, rules]);
   const exportBills = () => {
+    message.loading({ content: "正在导出数据...", key: "bill_export" });
     const data = rowsWithTrial.map((x) => ({
       账单ID: x.id,
       账单类型: x.bill_type,
@@ -173,7 +174,7 @@ export default function BillingPage() {
     } else {
       exportRowsToXlsx(data, buildExportFilename("billing", "xlsx"));
     }
-    message.success("导出成功");
+    message.success({ content: "导出成功", key: "bill_export" });
   };
 
   return (
@@ -224,6 +225,7 @@ export default function BillingPage() {
           rowKey="id"
           dataSource={rowsWithTrial}
           pagination={{ pageSize: 10 }}
+          locale={{ emptyText: <Empty description="暂无账单数据，请先生成或调整筛选条件" /> }}
           columns={[
             { title: "ID", dataIndex: "id" },
             { title: "类型", dataIndex: "bill_type", render: (v: string) => <Tag>{v}</Tag> },

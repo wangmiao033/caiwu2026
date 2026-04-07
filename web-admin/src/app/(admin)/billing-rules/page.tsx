@@ -235,33 +235,40 @@ export default function BillingRulesPage() {
   };
   const confirmImport = async () => {
     const valid = importRows.filter((x) => !x.error_message);
-    try {
-      const summary = await apiRequest<{ created_count: number; updated_count: number; failed_count: number }>(
-        "/billing/rules/bulk-import",
-        "POST",
-        {
-          rows: valid.map((x) => ({
-            game: x.game,
-            channel: x.channel,
-            discount_type: x.discountType,
-            channel_fee: x.channelFee,
-            tax_rate: x.taxRate,
-            rd_share: x.rdShare,
-            private_rate: x.privateRate,
-            ip_license: x.ipLicense,
-            chaofan_channel: x.chaofanChannel,
-            chaofan_rd: x.chaofanRd,
-            status: x.enabled ? "启用" : "停用",
-            remark: x.remark || "",
-          })),
+    Modal.confirm({
+      title: "确认导入规则",
+      content: `本次将导入 ${valid.length} 条有效规则，可能覆盖同渠道同游戏的历史规则。确认继续吗？`,
+      onOk: async () => {
+        message.loading({ content: "正在导入规则...", key: "rule_import" });
+        try {
+          const summary = await apiRequest<{ created_count: number; updated_count: number; failed_count: number }>(
+            "/billing/rules/bulk-import",
+            "POST",
+            {
+              rows: valid.map((x) => ({
+                game: x.game,
+                channel: x.channel,
+                discount_type: x.discountType,
+                channel_fee: x.channelFee,
+                tax_rate: x.taxRate,
+                rd_share: x.rdShare,
+                private_rate: x.privateRate,
+                ip_license: x.ipLicense,
+                chaofan_channel: x.chaofanChannel,
+                chaofan_rd: x.chaofanRd,
+                status: x.enabled ? "启用" : "停用",
+                remark: x.remark || "",
+              })),
+            }
+          );
+          saveLocal([...valid, ...rules.filter((x) => !valid.some((v) => `${v.channel}-${v.game}` === `${x.channel}-${x.game}`))]);
+          message.success({ content: `导入完成: 新增${summary.created_count} 更新${summary.updated_count} 失败${summary.failed_count}`, key: "rule_import" });
+          setImportOpen(false);
+        } catch (e) {
+          message.error({ content: (e as Error).message, key: "rule_import" });
         }
-      );
-      saveLocal([...valid, ...rules.filter((x) => !valid.some((v) => `${v.channel}-${v.game}` === `${x.channel}-${x.game}`))]);
-      message.success(`导入完成: 新增${summary.created_count} 更新${summary.updated_count} 失败${summary.failed_count}`);
-      setImportOpen(false);
-    } catch (e) {
-      message.error((e as Error).message);
-    }
+      },
+    });
   };
 
   const exportCurrent = () => {
