@@ -37,6 +37,7 @@ const menuItems = [
   { key: "/recon-tasks", icon: <CheckCircleOutlined />, label: "核对任务" },
   { key: "/billing", icon: <ReconciliationOutlined />, label: "账单管理" },
   { key: "/billing-rules", icon: <SettingOutlined />, label: "规则配置" },
+  { key: "/settlement-statements", icon: <ReconciliationOutlined />, label: "渠道结算对账单" },
   { key: "/exceptions", icon: <AlertOutlined />, label: "异常中心" },
   { key: "/invoices", icon: <FileTextOutlined />, label: "发票管理" },
   { key: "/receipts", icon: <MoneyCollectOutlined />, label: "回款管理" },
@@ -53,6 +54,7 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
     () =>
       menuItems.filter((m) => {
         if (m.key === "/user-management" && role !== "admin") return false;
+        if (m.key === "/settlement-statements" && role === "tech") return false;
         if (role === "ops_manager" && m.key === "/import") return false;
         if (role === "tech" && m.key === "/billing-rules") return false;
         return true;

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import enum
+import io
 import json
 import os
 from decimal import Decimal
@@ -12,8 +13,8 @@ from urllib.parse import urlparse
 
 import pandas as pd
 import jwt
-from openpyxl import load_workbook
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
+from openpyxl import Workbook, load_workbook
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Response, UploadFile
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import (
@@ -23,6 +24,7 @@ from sqlalchemy import (
     ForeignKey,
     Numeric,
     String,
+    UniqueConstraint,
     create_engine,
     func,
     inspect,
@@ -394,6 +396,45 @@ class UserProfile(Base):
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
 
 
+class ChannelSettlementStatement(Base):
+    __tablename__ = "channel_settlement_statements"
+    __table_args__ = (UniqueConstraint("period", "channel_id", name="uq_settlement_period_channel"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    period: Mapped[str] = mapped_column(String(20), index=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), index=True)
+    total_gross_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    total_discount_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    total_settlement_base_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    total_channel_fee_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    total_settlement_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    # Phase 1 固定 generated；保留字段便于后续扩展多状态
+    status: Mapped[str] = mapped_column(String(20), default="generated", index=True)
+    note: Mapped[str] = mapped_column(String(500), default="")
+    created_by: Mapped[str] = mapped_column(String(50), default="system")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now(), index=True)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now(), index=True)
+    channel: Mapped[Channel] = relationship()
+
+
+class ChannelSettlementStatementItem(Base):
+    __tablename__ = "channel_settlement_statement_items"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    statement_id: Mapped[int] = mapped_column(ForeignKey("channel_settlement_statements.id"), index=True)
+    game_id: Mapped[int] = mapped_column(ForeignKey("games.id"), index=True)
+    raw_game_name_snapshot: Mapped[str] = mapped_column(String(150), default="")
+    game_name_snapshot: Mapped[str] = mapped_column(String(150), default="")
+    gross_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    discount_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    settlement_base_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    channel_fee_rate: Mapped[Decimal] = mapped_column(Numeric(8, 4), default=Decimal("0"))
+    channel_fee_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    settlement_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    sort_order: Mapped[int] = mapped_column(default=0)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
+    game: Mapped[Game] = relationship()
+
+
 class ExceptionHandleStatus(str, enum.Enum):
     pending = "pending"
     ignored = "ignored"
@@ -530,6 +571,12 @@ class AuthLoginIn(BaseModel):
 class AdminResetPasswordIn(BaseModel):
     email: str
     new_password: str
+
+
+class SettlementStatementGenerateIn(BaseModel):
+    period: str
+    channel_id: int
+    overwrite: bool = False
 
 
 class BillStatusIn(BaseModel):
@@ -1889,6 +1936,344 @@ def bulk_validate_rules(payload: RuleBulkIn, db: Session = Depends(get_db), _: d
         "valid_count": len(payload.rows) - len(error_details),
         "error_details": error_details,
     }
+
+
+def _money2(value: Decimal) -> Decimal:
+    return Decimal(str(value)).quantize(Decimal("0.01"))
+
+
+def _ensure_period_format(period: str):
+    raw = (period or "").strip()
+    try:
+        dt.datetime.strptime(raw, "%Y-%m")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="period 格式非法，应为 YYYY-MM") from e
+
+
+def _build_settlement_snapshot(db: Session, period: str, channel_id: int) -> tuple[Channel, dict[int, dict], Decimal, Decimal, Decimal, Decimal, Decimal]:
+    _ensure_period_format(period)
+    channel = db.get(Channel, channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="渠道不存在")
+    recon_tasks = db.scalars(select(ReconTask).where(ReconTask.period == period, ReconTask.status == ReconStatus.confirmed)).all()
+    if not recon_tasks:
+        raise HTTPException(status_code=400, detail="该账期无已确认核对任务")
+    task_ids = [x.id for x in recon_tasks]
+    rows = db.scalars(
+        select(RawStatement).where(
+            RawStatement.recon_task_id.in_(task_ids),
+            RawStatement.period == period,
+            RawStatement.channel_name == channel.name,
+        )
+    ).all()
+    if not rows:
+        raise HTTPException(status_code=400, detail="该渠道该账期无可用流水")
+    maps = db.scalars(select(ChannelGameMap).where(ChannelGameMap.channel_id == channel_id)).all()
+    map_by_game_name = {m.game.name: m for m in maps}
+    if not map_by_game_name:
+        raise HTTPException(status_code=400, detail="该渠道缺少渠道游戏映射，无法生成对账单")
+    unmatched_games: set[str] = set()
+    items_by_game: dict[int, dict] = {}
+    for row in rows:
+        link = map_by_game_name.get(row.game_name)
+        if not link:
+            unmatched_games.add(row.game_name)
+            continue
+        game_id = link.game_id
+        item = items_by_game.get(game_id)
+        if not item:
+            item = {
+                "game_id": game_id,
+                "raw_game_name_snapshot": row.game_name or "",
+                "game_name_snapshot": link.game.name,
+                "gross_amount": Decimal("0"),
+                "discount_amount": Decimal("0"),
+                "settlement_base_amount": Decimal("0"),
+                "channel_fee_rate": Decimal(str(link.revenue_share_ratio)),
+                "channel_fee_amount": Decimal("0"),
+                "settlement_amount": Decimal("0"),
+            }
+            items_by_game[game_id] = item
+        item["gross_amount"] += Decimal(str(row.gross_amount or 0))
+    if unmatched_games:
+        sample = "、".join(sorted(list(unmatched_games))[:5])
+        raise HTTPException(status_code=400, detail=f"存在未映射游戏，无法生成：{sample}")
+    total_gross_amount = Decimal("0")
+    total_discount_amount = Decimal("0")
+    total_settlement_base_amount = Decimal("0")
+    total_channel_fee_amount = Decimal("0")
+    total_settlement_amount = Decimal("0")
+    for _, item in items_by_game.items():
+        item["gross_amount"] = _money2(item["gross_amount"])
+        # Phase 1：减免口径尚无稳定来源，固定 0，并保留字段快照
+        item["discount_amount"] = Decimal("0.00")
+        item["settlement_base_amount"] = _money2(item["gross_amount"] - item["discount_amount"])
+        item["channel_fee_amount"] = _money2(item["settlement_base_amount"] * item["channel_fee_rate"])
+        # 口径：对账金额 = 结算基数 - 通道费
+        item["settlement_amount"] = _money2(item["settlement_base_amount"] - item["channel_fee_amount"])
+        total_gross_amount += item["gross_amount"]
+        total_discount_amount += item["discount_amount"]
+        total_settlement_base_amount += item["settlement_base_amount"]
+        total_channel_fee_amount += item["channel_fee_amount"]
+        total_settlement_amount += item["settlement_amount"]
+    return (
+        channel,
+        items_by_game,
+        _money2(total_gross_amount),
+        _money2(total_discount_amount),
+        _money2(total_settlement_base_amount),
+        _money2(total_channel_fee_amount),
+        _money2(total_settlement_amount),
+    )
+
+
+@app.get("/settlement-statements")
+def list_settlement_statements(
+    period: Optional[str] = None,
+    channel_id: Optional[int] = None,
+    status: Optional[str] = None,
+    keyword: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance, Role.ops])),
+):
+    stmt = select(ChannelSettlementStatement).order_by(ChannelSettlementStatement.id.desc())
+    if period:
+        stmt = stmt.where(ChannelSettlementStatement.period == period)
+    if channel_id:
+        stmt = stmt.where(ChannelSettlementStatement.channel_id == channel_id)
+    if status:
+        stmt = stmt.where(ChannelSettlementStatement.status == status)
+    rows = db.scalars(stmt).all()
+    channel_name_map: dict[int, str] = {}
+    if rows:
+        ids = list({x.channel_id for x in rows})
+        channels = db.scalars(select(Channel).where(Channel.id.in_(ids))).all()
+        channel_name_map = {c.id: c.name for c in channels}
+    items = [
+        {
+            "id": row.id,
+            "period": row.period,
+            "channel_id": row.channel_id,
+            "channel_name": channel_name_map.get(row.channel_id, ""),
+            "total_gross_amount": row.total_gross_amount,
+            "total_discount_amount": row.total_discount_amount,
+            "total_settlement_base_amount": row.total_settlement_base_amount,
+            "total_channel_fee_amount": row.total_channel_fee_amount,
+            "total_settlement_amount": row.total_settlement_amount,
+            "status": row.status,
+            "updated_at": row.updated_at,
+            "created_at": row.created_at,
+        }
+        for row in rows
+    ]
+    if keyword:
+        key = keyword.strip().lower()
+        items = [x for x in items if key in (x["channel_name"] or "").lower()]
+    return {"items": items, "total": len(items)}
+
+
+@app.post("/settlement-statements/generate")
+def generate_settlement_statement(
+    payload: SettlementStatementGenerateIn,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance])),
+):
+    period = (payload.period or "").strip()
+    existing = db.scalar(
+        select(ChannelSettlementStatement).where(
+            ChannelSettlementStatement.period == period,
+            ChannelSettlementStatement.channel_id == payload.channel_id,
+        )
+    )
+    if existing and not payload.overwrite:
+        raise HTTPException(status_code=400, detail="已存在，请确认是否覆盖")
+    (
+        channel,
+        items_by_game,
+        total_gross_amount,
+        total_discount_amount,
+        total_settlement_base_amount,
+        total_channel_fee_amount,
+        total_settlement_amount,
+    ) = _build_settlement_snapshot(db, period, payload.channel_id)
+    now = dt.datetime.now()
+    if existing:
+        old_items = db.scalars(select(ChannelSettlementStatementItem).where(ChannelSettlementStatementItem.statement_id == existing.id)).all()
+        for old in old_items:
+            db.delete(old)
+        statement = existing
+    else:
+        statement = ChannelSettlementStatement(
+            period=period,
+            channel_id=payload.channel_id,
+            created_by=ctx["user"],
+            status="generated",
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(statement)
+        db.flush()
+    statement.total_gross_amount = total_gross_amount
+    statement.total_discount_amount = total_discount_amount
+    statement.total_settlement_base_amount = total_settlement_base_amount
+    statement.total_channel_fee_amount = total_channel_fee_amount
+    statement.total_settlement_amount = total_settlement_amount
+    statement.status = "generated"
+    statement.updated_at = now
+    sort_order = 1
+    for item in sorted(items_by_game.values(), key=lambda x: x["game_name_snapshot"]):
+        db.add(
+            ChannelSettlementStatementItem(
+                statement_id=statement.id,
+                game_id=item["game_id"],
+                raw_game_name_snapshot=item["raw_game_name_snapshot"],
+                game_name_snapshot=item["game_name_snapshot"],
+                gross_amount=item["gross_amount"],
+                discount_amount=item["discount_amount"],
+                settlement_base_amount=item["settlement_base_amount"],
+                channel_fee_rate=item["channel_fee_rate"],
+                channel_fee_amount=item["channel_fee_amount"],
+                settlement_amount=item["settlement_amount"],
+                sort_order=sort_order,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        sort_order += 1
+    action = "regenerate_settlement_statement" if existing else "generate_settlement_statement"
+    write_system_audit(
+        db,
+        ctx["user"],
+        action,
+        "settlement_statement",
+        str(statement.id),
+        f"生成渠道对账单：{period} / {channel.name}",
+    )
+    db.commit()
+    return {"id": statement.id, "period": statement.period, "channel_id": statement.channel_id, "status": statement.status}
+
+
+@app.get("/settlement-statements/{statement_id}")
+def get_settlement_statement(
+    statement_id: int,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance, Role.ops])),
+):
+    statement = db.get(ChannelSettlementStatement, statement_id)
+    if not statement:
+        raise HTTPException(status_code=404, detail="对账单不存在")
+    channel = db.get(Channel, statement.channel_id)
+    items = db.scalars(
+        select(ChannelSettlementStatementItem)
+        .where(ChannelSettlementStatementItem.statement_id == statement_id)
+        .order_by(ChannelSettlementStatementItem.sort_order.asc(), ChannelSettlementStatementItem.id.asc())
+    ).all()
+    return {
+        "id": statement.id,
+        "period": statement.period,
+        "channel_id": statement.channel_id,
+        "channel_name": channel.name if channel else "",
+        "status": statement.status,
+        "total_gross_amount": statement.total_gross_amount,
+        "total_discount_amount": statement.total_discount_amount,
+        "total_settlement_base_amount": statement.total_settlement_base_amount,
+        "total_channel_fee_amount": statement.total_channel_fee_amount,
+        "total_settlement_amount": statement.total_settlement_amount,
+        "note": statement.note,
+        "created_by": statement.created_by,
+        "created_at": statement.created_at,
+        "updated_at": statement.updated_at,
+        "items": [
+            {
+                "id": x.id,
+                "game_id": x.game_id,
+                "raw_game_name_snapshot": x.raw_game_name_snapshot,
+                "game_name_snapshot": x.game_name_snapshot,
+                "gross_amount": x.gross_amount,
+                "discount_amount": x.discount_amount,
+                "settlement_base_amount": x.settlement_base_amount,
+                "channel_fee_rate": x.channel_fee_rate,
+                "channel_fee_amount": x.channel_fee_amount,
+                "settlement_amount": x.settlement_amount,
+                "sort_order": x.sort_order,
+            }
+            for x in items
+        ],
+    }
+
+
+@app.get("/settlement-statements/{statement_id}/export")
+def export_settlement_statement(
+    statement_id: int,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance])),
+):
+    statement = db.get(ChannelSettlementStatement, statement_id)
+    if not statement:
+        raise HTTPException(status_code=404, detail="对账单不存在")
+    channel = db.get(Channel, statement.channel_id)
+    items = db.scalars(
+        select(ChannelSettlementStatementItem)
+        .where(ChannelSettlementStatementItem.statement_id == statement_id)
+        .order_by(ChannelSettlementStatementItem.sort_order.asc(), ChannelSettlementStatementItem.id.asc())
+    ).all()
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "渠道结算对账单"
+    ws["A1"] = "渠道结算对账单"
+    ws["A3"] = "结算周期"
+    ws["B3"] = statement.period
+    ws["D3"] = "渠道名称"
+    ws["E3"] = channel.name if channel else ""
+    ws["A5"] = "游戏名称"
+    ws["B5"] = "系统流水"
+    ws["C5"] = "减免/测试金"
+    ws["D5"] = "结算基数"
+    ws["E5"] = "通道费率"
+    ws["F5"] = "通道费金额"
+    ws["G5"] = "对账金额"
+    row_idx = 6
+    for item in items:
+        ws[f"A{row_idx}"] = item.game_name_snapshot
+        ws[f"B{row_idx}"] = float(item.gross_amount)
+        ws[f"C{row_idx}"] = float(item.discount_amount)
+        ws[f"D{row_idx}"] = float(item.settlement_base_amount)
+        ws[f"E{row_idx}"] = float(item.channel_fee_rate)
+        ws[f"F{row_idx}"] = float(item.channel_fee_amount)
+        ws[f"G{row_idx}"] = float(item.settlement_amount)
+        row_idx += 1
+    ws[f"A{row_idx}"] = "合计"
+    ws[f"B{row_idx}"] = float(statement.total_gross_amount)
+    ws[f"C{row_idx}"] = float(statement.total_discount_amount)
+    ws[f"D{row_idx}"] = float(statement.total_settlement_base_amount)
+    ws[f"F{row_idx}"] = float(statement.total_channel_fee_amount)
+    ws[f"G{row_idx}"] = float(statement.total_settlement_amount)
+    ws[f"A{row_idx + 2}"] = "备注"
+    ws[f"B{row_idx + 2}"] = statement.note or ""
+    ws.column_dimensions["A"].width = 24
+    ws.column_dimensions["B"].width = 14
+    ws.column_dimensions["C"].width = 14
+    ws.column_dimensions["D"].width = 14
+    ws.column_dimensions["E"].width = 12
+    ws.column_dimensions["F"].width = 14
+    ws.column_dimensions["G"].width = 14
+    bio = io.BytesIO()
+    wb.save(bio)
+    write_system_audit(
+        db,
+        ctx["user"],
+        "export_settlement_statement",
+        "settlement_statement",
+        str(statement.id),
+        f"导出渠道对账单：{statement.period} / {(channel.name if channel else '')}",
+    )
+    db.commit()
+    filename = f"settlement_statement_{statement.period}_{statement.id}.xlsx"
+    return Response(
+        content=bio.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/billing/rules/export")
