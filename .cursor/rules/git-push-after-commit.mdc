@@ -1,0 +1,11 @@
+---
+description: 在用户要求交付到远端时，提交后主动 push，减少遗漏；避免盲目每次 commit 都 push
+alwaysApply: true
+---
+
+# Git：提交后按需推送
+
+- 当用户明确要求把改动推到远端、或对话目标是「修完上线 / 提交并推送」时：在**已执行 `git commit` 且提交成功**之后，**在同一会话内**执行 `git push` 到当前分支的上游（例如 `git push origin HEAD` 或 `git push -u origin <branch>`）。
+- 推送前先 `git status -sb`：若**未领先于 origin**（无 `[ahead N]`），则不必重复 push。
+- **不要**配置 `post-commit` 钩子在每次 commit 后自动 push（易把半成品、多笔 commit 连续推上去，也更容易与远端不同步时撞车）。
+- 若 push 失败（需认证、网络、或非快进）：向用户说明原因与建议的下一步（`git pull --rebase` 等），不要静默忽略。
