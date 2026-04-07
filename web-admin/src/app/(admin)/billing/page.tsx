@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Button, Card, Descriptions, Drawer, Empty, Input, Modal, Select, Space, Switch, Table, Tag, message } from "antd";
+import { Button, Card, Descriptions, Drawer, Empty, Input, Modal, Select, Space, Switch, Table, Tag, Tooltip, message } from "antd";
 import { apiRequest } from "@/lib/api";
 import { BillingRule, calcTrialResult, matchRuleForBill } from "@/lib/billingTrial";
 import { buildExportFilename, exportRowsToCsv, exportRowsToXlsx } from "@/lib/export";
@@ -56,6 +56,9 @@ export default function BillingPage() {
   const [sendingId, setSendingId] = useState<number | null>(null);
   const [detail, setDetail] = useState<BillDetail | null>(null);
   const [showTrial, setShowTrial] = useState(false);
+  const [reconMode, setReconMode] = useState(true);
+  const [pageSize, setPageSize] = useState(100);
+  const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
   const [rules, setRules] = useState<BillingRule[]>([]);
   const [exportFormat, setExportFormat] = useState<"xlsx" | "csv">("xlsx");
 
@@ -132,14 +135,18 @@ export default function BillingPage() {
     [list, filterText]
   );
 
-  const rowsWithTrial = useMemo(() => {
-    return filtered.map((bill) => {
-      const baseGross = Number(bill.gross_amount ?? bill.amount ?? 0);
-      const rule = matchRuleForBill(rules, bill.bill_type, bill.target_name);
-      const trial = calcTrialResult(baseGross, rule);
-      return { ...bill, trial };
-    });
-  }, [filtered, rules]);
+  const rowsWithTrial = useMemo(
+    () =>
+      [...filtered]
+        .map((bill) => {
+          const baseGross = Number(bill.gross_amount ?? bill.amount ?? 0);
+          const rule = matchRuleForBill(rules, bill.bill_type, bill.target_name);
+          const trial = calcTrialResult(baseGross, rule);
+          return { ...bill, trial };
+        })
+        .sort((a, b) => Number(b.outstanding_amount ?? 0) - Number(a.outstanding_amount ?? 0)),
+    [filtered, rules]
+  );
 
   const detailTrial = useMemo(() => {
     if (!detail) return null;
@@ -173,6 +180,21 @@ export default function BillingPage() {
       exportRowsToXlsx(data, buildExportFilename("billing", "xlsx"));
     }
     message.success({ content: "导出成功", key: "bill_export" });
+  };
+
+  const selectedRows = useMemo(
+    () => rowsWithTrial.filter((x) => selectedRowKeys.includes(String(x.id))),
+    [rowsWithTrial, selectedRowKeys]
+  );
+
+  const gotoBatchReceipt = () => {
+    if (!selectedRows.length) {
+      message.warning("请先勾选账单");
+      return;
+    }
+    const ids = selectedRows.map((x) => x.id).join(",");
+    router.push(`/receipts?keyword=${ids}`);
+    message.info("请在回款页面逐条登记回款，登记后账单会自动变为已回款/部分回款");
   };
 
   return (
@@ -212,72 +234,123 @@ export default function BillingPage() {
               ]}
             />
             <Button onClick={exportBills}>导出账单</Button>
+            <Tooltip title="后端暂无批量直接置已回款接口，需先登记回款；这里支持批量跳转。">
+              <Button onClick={gotoBatchReceipt}>批量标记已回款</Button>
+            </Tooltip>
             <Space>
-              <span>显示试算结果</span>
-              <Switch checked={showTrial} onChange={setShowTrial} />
+              <span>对账模式</span>
+              <Switch checked={reconMode} onChange={setReconMode} checkedChildren="对账" unCheckedChildren="普通" />
+            </Space>
+            {!reconMode && (
+              <Space>
+                <span>显示试算结果</span>
+                <Switch checked={showTrial} onChange={setShowTrial} />
+              </Space>
+            )}
+            <Space>
+              <span>每页</span>
+              <Select
+                style={{ width: 100 }}
+                value={pageSize}
+                onChange={(v) => setPageSize(v)}
+                options={[
+                  { label: "100", value: 100 },
+                  { label: "200", value: 200 },
+                  { label: "500", value: 500 },
+                ]}
+              />
             </Space>
           </Space>
         }
       >
         <Table
+          size={reconMode ? "small" : "middle"}
           rowKey="id"
           dataSource={rowsWithTrial}
-          pagination={{ pageSize: 10 }}
+          rowSelection={{
+            selectedRowKeys,
+            onChange: (keys) => setSelectedRowKeys(keys.map((k) => String(k))),
+          }}
+          rowClassName={() => (reconMode ? "recon-row-compact" : "")}
+          pagination={{ pageSize, showSizeChanger: false }}
           locale={{ emptyText: <Empty description="暂无账单数据，请先生成或调整筛选条件" /> }}
-          columns={[
-            { title: "ID", dataIndex: "id" },
-            { title: "类型", dataIndex: "bill_type", render: (v: string) => <Tag>{v}</Tag> },
-            { title: "账期", dataIndex: "period" },
-            { title: "对象", dataIndex: "target_name" },
-            { title: "流水(预留)", dataIndex: "gross_amount", render: (v: number) => v ?? "-" },
-            { title: "通道费(预留)", dataIndex: "channel_fee", render: (v: number) => v ?? "-" },
-            { title: "税点(预留)", dataIndex: "tax_rate", render: (v: number) => v ?? "-" },
-            { title: "研发分成(预留)", dataIndex: "rd_share", render: (v: number) => v ?? "-" },
-            { title: "金额", dataIndex: "amount" },
-            { title: "开票状态", dataIndex: "invoice_status", render: (v: string) => <Tag color={v === "已开票" ? "green" : "orange"}>{v || "-"}</Tag> },
-            { title: "结算金额(预留)", dataIndex: "settlement_amount", render: (v: number) => v ?? "-" },
-            { title: "利润(预留)", dataIndex: "profit", render: (v: number) => v ?? "-" },
-            ...(showTrial
+          columns={
+            reconMode
               ? [
+                  { title: "渠道", dataIndex: "target_name" },
+                  { title: "流水", dataIndex: "gross_amount", render: (v: number, r: BillRow) => v ?? r.amount ?? "-" },
+                  { title: "金额", dataIndex: "amount" },
+                  { title: "已回款", dataIndex: "received_total", render: (v: number) => v ?? 0 },
+                  { title: "未回款", dataIndex: "outstanding_amount", render: (v: number) => v ?? 0 },
                   {
-                    title: "规则状态",
-                    dataIndex: ["trial", "matched"],
-                    render: (v: boolean) => <Tag color={v ? "green" : "red"}>{v ? "已匹配规则" : "未配置规则"}</Tag>,
+                    title: "状态",
+                    dataIndex: "flow_status",
+                    render: (v: string) => <Tag color={v === "已回款" ? "green" : v === "部分回款" ? "gold" : v === "已开票" ? "blue" : "default"}>{v || "-"}</Tag>,
                   },
-                  { title: "折扣后流水", dataIndex: ["trial", "discountedGross"], render: (v: number) => (v ?? "-") },
-                  { title: "通道费金额", dataIndex: ["trial", "channelFeeAmount"], render: (v: number) => (v ?? "-") },
-                  { title: "税额", dataIndex: ["trial", "taxAmount"], render: (v: number) => (v ?? "-") },
-                  { title: "研发分成金额", dataIndex: ["trial", "rdShareAmount"], render: (v: number) => (v ?? "-") },
-                  { title: "试算结算金额", dataIndex: ["trial", "settlementAmount"], render: (v: number) => (v ?? "-") },
-                  { title: "试算利润", dataIndex: ["trial", "profit"], render: (v: number) => (v ?? "-") },
+                  {
+                    title: "操作",
+                    render: (_, r: BillRow) => (
+                      <Button size="small" onClick={() => openDetail(r.id)}>
+                        查看详情
+                      </Button>
+                    ),
+                  },
                 ]
-              : []),
-            { title: "版本", dataIndex: "version" },
-            {
-              title: "账单状态",
-              dataIndex: "flow_status",
-              render: (v: string) => <Tag color={v === "已回款" ? "green" : v === "部分回款" ? "gold" : v === "已开票" ? "blue" : "default"}>{v || "-"}</Tag>,
-            },
-            { title: "回款状态", dataIndex: "receipt_status", render: (v: string) => <Tag color={v === "已回款" ? "green" : v === "部分回款" ? "gold" : "blue"}>{v || "-"}</Tag> },
-            { title: "已回款金额", dataIndex: "received_total", render: (v: number) => v ?? 0 },
-            { title: "未回款金额", dataIndex: "outstanding_amount", render: (v: number) => v ?? 0 },
-            {
-              title: "操作",
-              render: (_, r) => (
-                <Space>
-                  <Button size="small" onClick={() => openDetail(r.id)}>
-                    查看详情
-                  </Button>
-                  <Button size="small" loading={sendingId === r.id} onClick={() => sendBill(r.id, "已发送")}>
-                    发送
-                  </Button>
-                  <Button size="small" onClick={() => sendBill(r.id, "对方确认")}>
-                    确认
-                  </Button>
-                </Space>
-              ),
-            },
-          ]}
+              : [
+                  { title: "ID", dataIndex: "id" },
+                  { title: "类型", dataIndex: "bill_type", render: (v: string) => <Tag>{v}</Tag> },
+                  { title: "账期", dataIndex: "period" },
+                  { title: "对象", dataIndex: "target_name" },
+                  { title: "流水(预留)", dataIndex: "gross_amount", render: (v: number) => v ?? "-" },
+                  { title: "通道费(预留)", dataIndex: "channel_fee", render: (v: number) => v ?? "-" },
+                  { title: "税点(预留)", dataIndex: "tax_rate", render: (v: number) => v ?? "-" },
+                  { title: "研发分成(预留)", dataIndex: "rd_share", render: (v: number) => v ?? "-" },
+                  { title: "金额", dataIndex: "amount" },
+                  { title: "开票状态", dataIndex: "invoice_status", render: (v: string) => <Tag color={v === "已开票" ? "green" : "orange"}>{v || "-"}</Tag> },
+                  { title: "结算金额(预留)", dataIndex: "settlement_amount", render: (v: number) => v ?? "-" },
+                  { title: "利润(预留)", dataIndex: "profit", render: (v: number) => v ?? "-" },
+                  ...(showTrial
+                    ? [
+                        {
+                          title: "规则状态",
+                          dataIndex: ["trial", "matched"],
+                          render: (v: boolean) => <Tag color={v ? "green" : "red"}>{v ? "已匹配规则" : "未配置规则"}</Tag>,
+                        },
+                        { title: "折扣后流水", dataIndex: ["trial", "discountedGross"], render: (v: number) => (v ?? "-") },
+                        { title: "通道费金额", dataIndex: ["trial", "channelFeeAmount"], render: (v: number) => (v ?? "-") },
+                        { title: "税额", dataIndex: ["trial", "taxAmount"], render: (v: number) => (v ?? "-") },
+                        { title: "研发分成金额", dataIndex: ["trial", "rdShareAmount"], render: (v: number) => (v ?? "-") },
+                        { title: "试算结算金额", dataIndex: ["trial", "settlementAmount"], render: (v: number) => (v ?? "-") },
+                        { title: "试算利润", dataIndex: ["trial", "profit"], render: (v: number) => (v ?? "-") },
+                      ]
+                    : []),
+                  { title: "版本", dataIndex: "version" },
+                  {
+                    title: "账单状态",
+                    dataIndex: "flow_status",
+                    render: (v: string) => <Tag color={v === "已回款" ? "green" : v === "部分回款" ? "gold" : v === "已开票" ? "blue" : "default"}>{v || "-"}</Tag>,
+                  },
+                  { title: "回款状态", dataIndex: "receipt_status", render: (v: string) => <Tag color={v === "已回款" ? "green" : v === "部分回款" ? "gold" : "blue"}>{v || "-"}</Tag> },
+                  { title: "已回款金额", dataIndex: "received_total", render: (v: number) => v ?? 0 },
+                  { title: "未回款金额", dataIndex: "outstanding_amount", render: (v: number) => v ?? 0 },
+                  {
+                    title: "操作",
+                    render: (_, r: BillRow) => (
+                      <Space>
+                        <Button size="small" onClick={() => openDetail(r.id)}>
+                          查看详情
+                        </Button>
+                        <Button size="small" loading={sendingId === r.id} onClick={() => sendBill(r.id, "已发送")}>
+                          发送
+                        </Button>
+                        <Button size="small" onClick={() => sendBill(r.id, "对方确认")}>
+                          确认
+                        </Button>
+                      </Space>
+                    ),
+                  },
+                ]
+          }
         />
       </Card>
       <Drawer open={!!detail} title={`查看账单详情 #${detail?.id || ""}`} width={560} onClose={() => setDetail(null)}>
@@ -340,6 +413,12 @@ export default function BillingPage() {
           </Space>
         )}
       </Drawer>
+      <style jsx global>{`
+        .recon-row-compact td {
+          padding-top: 6px !important;
+          padding-bottom: 6px !important;
+        }
+      `}</style>
     </Space>
   );
 }
