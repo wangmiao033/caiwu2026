@@ -41,6 +41,7 @@ const menuItems = [
   { key: "/invoices", icon: <FileTextOutlined />, label: "发票管理" },
   { key: "/receipts", icon: <MoneyCollectOutlined />, label: "回款管理" },
   { key: "/finance", icon: <DollarOutlined />, label: "财务看板" },
+  { key: "/user-management", icon: <SettingOutlined />, label: "用户管理" },
   { key: "/audit-logs", icon: <AuditOutlined />, label: "审计日志" },
 ];
 
@@ -51,6 +52,7 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
   const visibleMenuItems = useMemo(
     () =>
       menuItems.filter((m) => {
+        if (m.key === "/user-management" && role !== "admin") return false;
         if (role === "ops_manager" && m.key === "/import") return false;
         if (role === "tech" && m.key === "/billing-rules") return false;
         return true;

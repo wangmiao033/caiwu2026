@@ -65,6 +65,7 @@ JWT_SECRET = os.getenv("JWT_SECRET", "change-this-secret")
 JWT_EXPIRE_DAYS = int(os.getenv("JWT_EXPIRE_DAYS", "7"))
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "").strip()
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
@@ -526,6 +527,11 @@ class AuthLoginIn(BaseModel):
     password: str
 
 
+class AdminResetPasswordIn(BaseModel):
+    email: str
+    new_password: str
+
+
 class BillStatusIn(BaseModel):
     status: BillStatus
     note: str = ""
@@ -683,6 +689,67 @@ def supabase_sign_in(email: str, password: str) -> dict:
         raise HTTPException(status_code=502, detail=f"Supabase 登录失败: {parsed.get('error_description') or parsed.get('msg') or 'unknown'}") from e
     except Exception as e:
         raise HTTPException(status_code=502, detail="认证服务连接失败") from e
+
+
+def validate_new_password(password: str):
+    raw = (password or "").strip()
+    if len(raw) < 8:
+        raise HTTPException(status_code=400, detail="新密码不符合规则：至少 8 位")
+    if not any(ch.isalpha() for ch in raw) or not any(ch.isdigit() for ch in raw):
+        raise HTTPException(status_code=400, detail="新密码不符合规则：需包含字母和数字")
+
+
+def supabase_find_user_by_email(email: str) -> Optional[dict]:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase 配置缺失，请设置 SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY")
+    url = f"{SUPABASE_URL}/auth/v1/admin/users?email={email}"
+    req = url_request.Request(
+        url,
+        method="GET",
+        headers={
+            "apikey": SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with url_request.urlopen(req, timeout=15) as resp:
+            raw = resp.read().decode("utf-8")
+            payload = json.loads(raw) if raw else {}
+            users = payload.get("users") or []
+            return users[0] if users else None
+    except url_error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore") if hasattr(e, "read") else ""
+        raise HTTPException(status_code=502, detail=f"Supabase 查询用户失败: {body[:200] or e.reason}") from e
+    except Exception as e:
+        raise HTTPException(status_code=502, detail="Supabase 查询用户失败，请稍后再试") from e
+
+
+def supabase_admin_reset_password(user_id: str, new_password: str):
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase 配置缺失，请设置 SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY")
+    url = f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}"
+    payload = json.dumps({"password": new_password}).encode("utf-8")
+    req = url_request.Request(
+        url,
+        method="PUT",
+        data=payload,
+        headers={
+            "apikey": SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with url_request.urlopen(req, timeout=15):
+            return
+    except url_error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore") if hasattr(e, "read") else ""
+        if e.code == 400:
+            raise HTTPException(status_code=400, detail="新密码不符合要求") from e
+        raise HTTPException(status_code=502, detail=f"Supabase 重置失败，请稍后再试: {body[:200] or e.reason}") from e
+    except Exception as e:
+        raise HTTPException(status_code=502, detail="Supabase 重置失败，请稍后再试") from e
 
 
 def require_role(roles: list[Role]):
@@ -921,6 +988,35 @@ def auth_me(ctx: dict = Depends(require_roles([Role.admin, Role.finance_manager,
         raise HTTPException(status_code=403, detail="账号已停用")
     role = parse_profile_role(profile.role)
     return {"email": email, "role": role.value, "is_active": profile.is_active}
+
+
+@app.post("/auth/admin/reset-password")
+def auth_admin_reset_password(
+    payload: AdminResetPasswordIn,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_roles([Role.admin])),
+):
+    email = (payload.email or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="邮箱不能为空")
+    validate_new_password(payload.new_password)
+    user = supabase_find_user_by_email(email)
+    if not user:
+        raise HTTPException(status_code=404, detail="未找到该邮箱对应的用户")
+    user_id = str(user.get("id") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=502, detail="Supabase 用户数据异常")
+    supabase_admin_reset_password(user_id, payload.new_password)
+    write_system_audit(
+        db,
+        ctx["user"],
+        "reset_user_password",
+        "auth_user",
+        email,
+        f"operator_role=admin; 管理员重置用户密码：{email}",
+    )
+    db.commit()
+    return {"ok": True, "message": "密码已重置"}
 
 
 @app.post("/channels")
