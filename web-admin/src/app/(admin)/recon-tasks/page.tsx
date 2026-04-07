@@ -11,10 +11,13 @@ type TaskRow = {
   status: string;
 };
 type IssueRow = {
-  id: number;
+  issue_id: number;
+  task_id: number;
   issue_type: string;
-  detail: string;
-  resolved: boolean;
+  message: string;
+  status: string;
+  row_no?: number | null;
+  raw_data?: Record<string, unknown> | null;
 };
 
 export default function ReconTasksPage() {
@@ -148,19 +151,19 @@ export default function ReconTasksPage() {
       />
       <Drawer open={!!taskId} onClose={() => setTaskId(null)} title={`任务异常明细 #${taskId || ""}`} width={720}>
         <Table
-          rowKey="id"
+          rowKey="issue_id"
           dataSource={issues}
           pagination={{ pageSize: 8 }}
           locale={{ emptyText: <Empty description="该任务暂无异常明细" /> }}
           columns={[
-            { title: "异常ID", dataIndex: "id", width: 90 },
+            { title: "异常ID", dataIndex: "issue_id", width: 90 },
             { title: "类型", dataIndex: "issue_type", width: 130 },
-            { title: "明细", dataIndex: "detail" },
-            { title: "状态", dataIndex: "resolved", render: (v: boolean) => <Tag color={v ? "green" : "red"}>{v ? "已处理" : "未处理"}</Tag> },
+            { title: "明细", dataIndex: "message" },
+            { title: "状态", dataIndex: "status", render: (v: string) => <Tag color={v === "已处理" ? "green" : "red"}>{v || "未处理"}</Tag> },
             {
               title: "操作",
               render: (_, r) => (
-                <Button size="small" disabled={r.resolved} onClick={() => resolveIssue(r.id)}>
+                <Button size="small" disabled={r.status === "已处理"} onClick={() => resolveIssue(r.issue_id)}>
                   标记已处理
                 </Button>
               ),
