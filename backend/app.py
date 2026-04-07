@@ -5,6 +5,7 @@ import enum
 import os
 from decimal import Decimal
 from typing import Optional
+from urllib.parse import urlparse
 
 import pandas as pd
 import jwt
@@ -38,8 +39,22 @@ def resolve_database_url() -> str:
     raise RuntimeError("DATABASE_URL is required in non-local environment.")
 
 
-DATABASE_URL = resolve_database_url()
-engine = create_engine(DATABASE_URL, echo=False, future=True)
+def normalize_database_url(db_url: str) -> str:
+    # Neon/Heroku style URL may use postgres://, SQLAlchemy expects postgresql://
+    if db_url.startswith("postgres://"):
+        return db_url.replace("postgres://", "postgresql://", 1)
+    return db_url
+
+
+def is_sqlite_url(db_url: str) -> bool:
+    return urlparse(db_url).scheme.startswith("sqlite")
+
+
+DATABASE_URL = normalize_database_url(resolve_database_url())
+engine_kwargs = {"echo": False, "future": True, "pool_pre_ping": True}
+if is_sqlite_url(DATABASE_URL):
+    engine_kwargs["connect_args"] = {"check_same_thread": False}
+engine = create_engine(DATABASE_URL, **engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 JWT_SECRET = os.getenv("JWT_SECRET", "change-this-secret")
 JWT_EXPIRE_DAYS = int(os.getenv("JWT_EXPIRE_DAYS", "7"))
