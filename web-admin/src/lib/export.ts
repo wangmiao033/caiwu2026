@@ -1,5 +1,15 @@
 import * as XLSX from "xlsx";
 
+function pad2(n: number) {
+  return String(n).padStart(2, "0");
+}
+
+export function buildExportFilename(prefix: string, ext: "xlsx" | "csv" = "xlsx") {
+  const d = new Date();
+  const stamp = `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}_${pad2(d.getHours())}${pad2(d.getMinutes())}`;
+  return `${prefix}_${stamp}.${ext}`;
+}
+
 export function exportRowsToXlsx(rows: Record<string, unknown>[], filename: string) {
   const ws = XLSX.utils.json_to_sheet(rows);
   const wb = XLSX.utils.book_new();

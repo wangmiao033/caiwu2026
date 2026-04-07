@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Button, Card, Descriptions, Drawer, Input, Modal, Select, Space, Switch, Table, Tag, message } from "antd";
 import { apiRequest } from "@/lib/api";
 import { BillingRule, calcTrialResult, matchRuleForBill } from "@/lib/billingTrial";
-import { exportRowsToCsv, exportRowsToXlsx } from "@/lib/export";
+import { buildExportFilename, exportRowsToCsv, exportRowsToXlsx } from "@/lib/export";
 
 type BillRow = {
   id: number;
@@ -20,6 +21,7 @@ type BillRow = {
   received_total?: number;
   outstanding_amount?: number;
   latest_receipt_date?: string;
+  flow_status?: string;
   gross_amount?: number;
   channel_fee?: number;
   tax_rate?: number;
@@ -46,6 +48,8 @@ type BillDetail = BillRow & {
 };
 
 export default function BillingPage() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [period, setPeriod] = useState("2026-03");
   const [list, setList] = useState<BillRow[]>([]);
   const [filterType, setFilterType] = useState<string>("");
@@ -63,6 +67,13 @@ export default function BillingPage() {
       setRules(JSON.parse(cache));
     } catch {}
   }, []);
+  useEffect(() => {
+    const q = searchParams.get("bill_id") || searchParams.get("keyword") || "";
+    if (q) {
+      setFilterText(q);
+      loadBills();
+    }
+  }, [searchParams]);
 
   const generate = async () => {
     Modal.confirm({
@@ -143,7 +154,7 @@ export default function BillingPage() {
       账单类型: x.bill_type,
       目标对象: x.target_name,
       账期: x.period,
-      状态: x.status,
+      状态: x.flow_status || x.status,
       流水: x.gross_amount ?? x.amount,
       规则状态: x.trial?.matched ? "已匹配规则" : "未配置规则",
       折扣后流水: x.trial?.discountedGross ?? "",
@@ -158,10 +169,11 @@ export default function BillingPage() {
       说明: "试算结果仅供前端预览核对，正式结算以后端结果为准",
     }));
     if (exportFormat === "csv") {
-      exportRowsToCsv(data, "billing_export.csv");
+      exportRowsToCsv(data, buildExportFilename("billing", "csv"));
     } else {
-      exportRowsToXlsx(data, "billing_export.xlsx");
+      exportRowsToXlsx(data, buildExportFilename("billing", "xlsx"));
     }
+    message.success("导出成功");
   };
 
   return (
@@ -244,9 +256,9 @@ export default function BillingPage() {
               : []),
             { title: "版本", dataIndex: "version" },
             {
-              title: "发送状态",
-              dataIndex: "status",
-              render: (v: string) => <Tag color={v === "有异议" ? "red" : v === "对方确认" ? "green" : "blue"}>{v}</Tag>,
+              title: "账单状态",
+              dataIndex: "flow_status",
+              render: (v: string) => <Tag color={v === "已回款" ? "green" : v === "部分回款" ? "gold" : v === "已开票" ? "blue" : "default"}>{v || "-"}</Tag>,
             },
             { title: "回款状态", dataIndex: "receipt_status", render: (v: string) => <Tag color={v === "已回款" ? "green" : v === "部分回款" ? "gold" : "blue"}>{v || "-"}</Tag> },
             { title: "已回款金额", dataIndex: "received_total", render: (v: number) => v ?? 0 },
@@ -256,7 +268,7 @@ export default function BillingPage() {
               render: (_, r) => (
                 <Space>
                   <Button size="small" onClick={() => openDetail(r.id)}>
-                    详情
+                    查看详情
                   </Button>
                   <Button size="small" loading={sendingId === r.id} onClick={() => sendBill(r.id, "已发送")}>
                     发送
@@ -270,7 +282,7 @@ export default function BillingPage() {
           ]}
         />
       </Card>
-      <Drawer open={!!detail} title={`账单详情 #${detail?.id || ""}`} width={560} onClose={() => setDetail(null)}>
+      <Drawer open={!!detail} title={`查看账单详情 #${detail?.id || ""}`} width={560} onClose={() => setDetail(null)}>
         {detail && (
           <Space direction="vertical" style={{ width: "100%" }} size={12}>
             <Descriptions column={1} bordered>
@@ -278,7 +290,7 @@ export default function BillingPage() {
               <Descriptions.Item label="账期">{detail.period}</Descriptions.Item>
               <Descriptions.Item label="对象">{detail.target_name}</Descriptions.Item>
               <Descriptions.Item label="金额">{detail.amount}</Descriptions.Item>
-              <Descriptions.Item label="状态">{detail.status}</Descriptions.Item>
+              <Descriptions.Item label="账单状态">{detail.flow_status || detail.status}</Descriptions.Item>
               <Descriptions.Item label="开票状态">{detail.invoice_status || "-"}</Descriptions.Item>
               <Descriptions.Item label="回款状态">{detail.receipt_status || detail.collection_status || "-"}</Descriptions.Item>
               <Descriptions.Item label="规则来源说明">
@@ -308,6 +320,11 @@ export default function BillingPage() {
                 <Descriptions.Item label="发票编号">{detail.invoice_info?.invoice_no || "-"}</Descriptions.Item>
                 <Descriptions.Item label="发票金额">{detail.invoice_info?.invoice_amount ?? 0}</Descriptions.Item>
                 <Descriptions.Item label="开票日期">{detail.invoice_info?.issue_date || "-"}</Descriptions.Item>
+                <Descriptions.Item label="操作">
+                  <Button size="small" onClick={() => router.push(`/invoices?keyword=${detail.id}`)}>
+                    查看发票
+                  </Button>
+                </Descriptions.Item>
               </Descriptions>
             </Card>
             <Card size="small" title="关联回款信息">
@@ -316,6 +333,11 @@ export default function BillingPage() {
                 <Descriptions.Item label="未回款金额">{detail.receipt_info?.outstanding_amount ?? detail.outstanding_amount ?? 0}</Descriptions.Item>
                 <Descriptions.Item label="最近回款日期">{detail.receipt_info?.latest_receipt_date || detail.latest_receipt_date || "-"}</Descriptions.Item>
                 <Descriptions.Item label="回款状态">{detail.receipt_info?.receipt_status || detail.receipt_status || "-"}</Descriptions.Item>
+                <Descriptions.Item label="操作">
+                  <Button size="small" onClick={() => router.push(`/receipts?keyword=${detail.id}`)}>
+                    查看回款
+                  </Button>
+                </Descriptions.Item>
               </Descriptions>
             </Card>
           </Space>

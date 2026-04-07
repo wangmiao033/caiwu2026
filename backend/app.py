@@ -368,6 +368,25 @@ class BillOut(Out):
     collection_status: CollectionStatus
 
 
+def calc_bill_flow_status(
+    bill_amount: Decimal,
+    bill_status: BillStatus,
+    has_invoice: bool,
+    received_total: Decimal,
+) -> str:
+    if received_total >= bill_amount and bill_amount > 0:
+        return "已回款"
+    if received_total > 0:
+        return "部分回款"
+    if has_invoice:
+        return "已开票"
+    if bill_status == BillStatus.sent:
+        return "已发送"
+    if bill_status in (BillStatus.acknowledged, BillStatus.disputed):
+        return "已生成"
+    return "草稿"
+
+
 class ImportHistoryOut(Out):
     id: int
     import_type: str
@@ -1082,6 +1101,7 @@ def list_bills(
             receipt_status = "已回款"
         elif received_total > 0:
             receipt_status = "部分回款"
+        flow_status = calc_bill_flow_status(Decimal(str(b.amount)), b.status, bool(invoices), received_total)
         result.append(
             {
                 "id": b.id,
@@ -1094,6 +1114,7 @@ def list_bills(
                 "collection_status": b.collection_status,
                 "invoice_status": invoice_status,
                 "receipt_status": receipt_status,
+                "flow_status": flow_status,
                 "invoiced_total": invoiced_total,
                 "received_total": received_total,
                 "outstanding_amount": outstanding_amount,
@@ -1125,6 +1146,7 @@ def get_bill_detail(
         receipt_status = "已回款"
     elif received_total > 0:
         receipt_status = "部分回款"
+    flow_status = calc_bill_flow_status(Decimal(str(b.amount)), b.status, bool(invoices), received_total)
     return {
         "id": b.id,
         "bill_type": b.bill_type,
@@ -1136,6 +1158,7 @@ def get_bill_detail(
         "collection_status": b.collection_status,
         "invoice_status": invoice_status,
         "receipt_status": receipt_status,
+        "flow_status": flow_status,
         "invoiced_total": invoiced_total,
         "received_total": received_total,
         "outstanding_amount": outstanding_amount,
@@ -1435,6 +1458,13 @@ def finance_dashboard(db: Session = Depends(get_db), _: dict = Depends(require_r
         )
     pending_bills = db.scalars(select(Bill).where(Bill.collection_status != CollectionStatus.paid).order_by(Bill.id.desc()).limit(20)).all()
     pending_list = []
+    flow_status_breakdown = {"草稿": 0, "已生成": 0, "已发送": 0, "已开票": 0, "部分回款": 0, "已回款": 0}
+    all_bills = db.scalars(select(Bill)).all()
+    for b in all_bills:
+        inv_count = db.scalar(select(func.count(Invoice.id)).where(Invoice.bill_id == b.id))
+        rec_sum = db.scalar(select(func.coalesce(func.sum(Receipt.amount), 0)).where(Receipt.bill_id == b.id))
+        flow_status = calc_bill_flow_status(Decimal(str(b.amount)), b.status, bool(inv_count), Decimal(str(rec_sum)))
+        flow_status_breakdown[flow_status] = flow_status_breakdown.get(flow_status, 0) + 1
     for b in pending_bills:
         rec_sum = db.scalar(select(func.coalesce(func.sum(Receipt.amount), 0)).where(Receipt.bill_id == b.id))
         rec_total = Decimal(str(rec_sum))
@@ -1448,6 +1478,7 @@ def finance_dashboard(db: Session = Depends(get_db), _: dict = Depends(require_r
                 "received_total": rec_total,
                 "outstanding_amount": max(Decimal("0"), Decimal(str(b.amount)) - rec_total),
                 "receipt_status": "部分回款" if rec_total > 0 else "待回款",
+                "flow_status": calc_bill_flow_status(Decimal(str(b.amount)), b.status, False, rec_total),
             }
         )
     return {
@@ -1457,6 +1488,7 @@ def finance_dashboard(db: Session = Depends(get_db), _: dict = Depends(require_r
         "outstanding": outstanding,
         "overdue_amount": overdue_amount,
         "status_breakdown": {"待回款": pending_count, "部分回款": partial_count, "已回款": paid_count},
+        "flow_status_breakdown": flow_status_breakdown,
         "recent_period_summary": recent_period_summary,
         "pending_bills": pending_list,
     }

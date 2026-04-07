@@ -1,9 +1,11 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useEffect } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Button, Card, Form, Input, InputNumber, Modal, Select, Space, Table, Tag, message } from "antd";
 import { apiRequest } from "@/lib/api";
-import { exportRowsToXlsx } from "@/lib/export";
+import { buildExportFilename, exportRowsToXlsx } from "@/lib/export";
 
 type InvoiceRow = {
   id: number;
@@ -19,6 +21,8 @@ type InvoiceRow = {
 };
 
 export default function InvoicesPage() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [rows, setRows] = useState<InvoiceRow[]>([]);
   const [status, setStatus] = useState("");
   const [period, setPeriod] = useState("");
@@ -28,6 +32,13 @@ export default function InvoicesPage() {
   const [editing, setEditing] = useState<InvoiceRow | null>(null);
   const [form] = Form.useForm();
   const [editForm] = Form.useForm();
+  useEffect(() => {
+    const q = searchParams.get("keyword") || searchParams.get("bill_id") || "";
+    if (q) setKeyword(q);
+  }, [searchParams]);
+  useEffect(() => {
+    load();
+  }, [status, period, keyword]);
 
   const load = async () => {
     try {
@@ -89,13 +100,13 @@ export default function InvoicesPage() {
         创建时间: x.created_at || "",
       }));
   const exportData = async () => {
-    message.loading({ content: "正在导出...", key: "inv_export" });
+    message.loading({ content: "正在导出数据...", key: "inv_export" });
     try {
       let exportRows = filtered;
       if (exportScope === "all") {
         exportRows = await apiRequest<InvoiceRow[]>("/invoices");
       }
-      exportRowsToXlsx(toExportRows(exportRows), "invoices_export.xlsx");
+      exportRowsToXlsx(toExportRows(exportRows), buildExportFilename("invoices", "xlsx"));
       message.success({ content: "导出成功", key: "inv_export" });
     } catch (e) {
       message.error({ content: `导出失败: ${(e as Error).message}`, key: "inv_export" });
@@ -180,14 +191,22 @@ export default function InvoicesPage() {
                     setOpenEdit(true);
                   }}
                 >
-                  编辑
+                  编辑信息
+                </Button>
+              ),
+            },
+            {
+              title: "联动",
+              render: (_, r) => (
+                <Button size="small" onClick={() => router.push(`/billing?bill_id=${r.bill_id}`)}>
+                  查看账单
                 </Button>
               ),
             },
           ]}
         />
       </Card>
-      <Modal open={openEdit} title={`编辑发票 #${editing?.id || ""}`} onCancel={() => setOpenEdit(false)} onOk={update}>
+      <Modal open={openEdit} title={`编辑发票信息 #${editing?.id || ""}`} onCancel={() => setOpenEdit(false)} onOk={update}>
         <Form form={editForm} layout="vertical">
           <Form.Item label="发票编号" name="invoice_no" rules={[{ required: true }]}><Input /></Form.Item>
           <Form.Item label="账单ID" name="bill_id" rules={[{ required: true }]}><InputNumber style={{ width: "100%" }} /></Form.Item>

@@ -12,6 +12,7 @@ type FinanceRes = {
   outstanding: number;
   overdue_amount?: number;
   status_breakdown?: Record<string, number>;
+  flow_status_breakdown?: Record<string, number>;
   recent_period_summary?: Array<{ period: string; bill_count: number; receivable: number; received: number; outstanding: number }>;
   pending_bills?: Array<{
     bill_id: number;
@@ -42,7 +43,7 @@ export default function FinancePage() {
     }
   };
 
-  const chartData = Object.entries(data.status_breakdown || {}).map(([name, value]) => ({ name, value }));
+  const chartData = Object.entries(data.flow_status_breakdown || data.status_breakdown || {}).map(([name, value]) => ({ name, value }));
 
   return (
     <>
@@ -58,7 +59,7 @@ export default function FinancePage() {
         <Col span={8} style={{ marginTop: 16 }}><Card><Statistic title="发票数量" value={invoiceCount} /></Card></Col>
         <Col span={8} style={{ marginTop: 16 }}><Card><Statistic title="回款数量" value={receiptCount} /></Card></Col>
       </Row>
-      <Card title="回款状态分布" style={{ marginTop: 16 }}>
+      <Card title="账单状态分布" style={{ marginTop: 16 }}>
         <Column data={chartData} xField="name" yField="value" />
       </Card>
       <Card title="最近账期汇总" style={{ marginTop: 16 }}>
