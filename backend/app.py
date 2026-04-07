@@ -386,7 +386,8 @@ class UserProfile(Base):
     __tablename__ = "user_profiles"
     id: Mapped[int] = mapped_column(primary_key=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    role: Mapped[Role] = mapped_column(Enum(Role), index=True)
+    # 使用 VARCHAR 存角色字符串，避免与 Postgres 上复用的旧 enum(role) 类型冲突（旧值不含 finance_manager 等）
+    role: Mapped[str] = mapped_column(String(50), index=True)
     is_active: Mapped[bool] = mapped_column(default=True, index=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
@@ -714,6 +715,42 @@ def require_roles(roles: list[Role]):
     return require_role(roles)
 
 
+def parse_profile_role(value: object) -> Role:
+    """将 user_profiles.role（字符串或历史 Enum 实例）解析为 Role，供 RBAC 使用。"""
+    if isinstance(value, Role):
+        return normalize_role(value)
+    if isinstance(value, str):
+        try:
+            return normalize_role(Role(value))
+        except ValueError as e:
+            raise HTTPException(status_code=500, detail=f"用户角色配置无效: {value}") from e
+    raise HTTPException(status_code=500, detail="用户角色配置无效")
+
+
+def ensure_user_profiles_role_string():
+    """Postgres：若 role 列为旧 enum，迁移为 VARCHAR，避免新角色值写入失败。"""
+    inspector = inspect(engine)
+    if "user_profiles" not in inspector.get_table_names():
+        return
+    if is_sqlite_url(DATABASE_URL):
+        return
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT data_type FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = 'user_profiles' AND column_name = 'role'"
+                )
+            ).mappings().first()
+        if not row or row["data_type"] != "USER-DEFINED":
+            return
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE user_profiles ALTER COLUMN role TYPE VARCHAR(50) USING role::text"))
+    except Exception:
+        # 迁移失败不阻塞启动；后续插入仍可能失败，需人工处理库表
+        pass
+
+
 def create_default_data(db: Session):
     if db.scalar(select(func.count(User.id))) == 0:
         db.add_all(
@@ -734,10 +771,10 @@ def create_default_data(db: Session):
     if db.scalar(select(func.count(UserProfile.id))) == 0:
         db.add_all(
             [
-                UserProfile(email="wangmiao@dxyx6888.com", role=Role.admin, is_active=True),
-                UserProfile(email="caiwu@dxyx6888.com", role=Role.finance_manager, is_active=True),
-                UserProfile(email="pingce@dxyx6888.com", role=Role.ops_manager, is_active=True),
-                UserProfile(email="515658123@qq.com", role=Role.tech, is_active=True),
+                UserProfile(email="wangmiao@dxyx6888.com", role=Role.admin.value, is_active=True),
+                UserProfile(email="caiwu@dxyx6888.com", role=Role.finance_manager.value, is_active=True),
+                UserProfile(email="pingce@dxyx6888.com", role=Role.ops_manager.value, is_active=True),
+                UserProfile(email="515658123@qq.com", role=Role.tech.value, is_active=True),
             ]
         )
     db.commit()
@@ -824,6 +861,7 @@ app = FastAPI(title="内部对账系统", version="1.0.0")
 @app.on_event("startup")
 def startup():
     Base.metadata.create_all(bind=engine)
+    ensure_user_profiles_role_string()
     ensure_game_variant_settlement_columns()
     ensure_import_enrichment_columns()
     with SessionLocal() as db:
@@ -847,7 +885,7 @@ def _perform_auth_login(email: str, password: str, db: Session):
         raise HTTPException(status_code=403, detail="未分配系统角色")
     if not profile.is_active:
         raise HTTPException(status_code=403, detail="账号已停用")
-    role = normalize_role(profile.role)
+    role = parse_profile_role(profile.role)
     token = build_token(auth_email, role)
     write_system_audit(db, auth_email, "login_success", "auth", auth_email, "Supabase 邮箱登录成功")
     db.commit()
@@ -881,7 +919,7 @@ def auth_me(ctx: dict = Depends(require_roles([Role.admin, Role.finance_manager,
         raise HTTPException(status_code=403, detail="未分配系统角色")
     if not profile.is_active:
         raise HTTPException(status_code=403, detail="账号已停用")
-    role = normalize_role(profile.role)
+    role = parse_profile_role(profile.role)
     return {"email": email, "role": role.value, "is_active": profile.is_active}
 
 
