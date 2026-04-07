@@ -2297,10 +2297,16 @@ def export_rules(db: Session = Depends(get_db), _: dict = Depends(require_role([
 @app.post("/billing/generate")
 def generate_bills(
     period: str = Query(...),
+    overwrite: bool = Query(default=False),
     force_new_version: bool = Query(default=False),
     db: Session = Depends(get_db),
     _: dict = Depends(require_role([Role.admin, Role.finance])),
 ):
+    # 兼容历史参数：旧前端可能仍传 force_new_version，语义上等同于重生成
+    overwrite = bool(overwrite or force_new_version)
+    existing_period_bills = db.scalars(select(Bill).where(Bill.period == period)).all()
+    if existing_period_bills and not overwrite:
+        raise HTTPException(status_code=400, detail="该账期账单已存在")
     recon_tasks = db.scalars(select(ReconTask).where(ReconTask.period == period, ReconTask.status == ReconStatus.confirmed)).all()
     if not recon_tasks:
         raise HTTPException(status_code=400, detail="该账期无已确认核对任务")
@@ -2320,24 +2326,38 @@ def generate_bills(
         rd_amount = r.gross_amount * link.rd_settlement_ratio
         channel_sum[r.channel_name] = channel_sum.get(r.channel_name, Decimal("0")) + channel_amount
         rd_sum[link.game.rd_company] = rd_sum.get(link.game.rd_company, Decimal("0")) + rd_amount
+    existing_key_map: dict[tuple[BillType, str], Bill] = {}
+    for bill in existing_period_bills:
+        key = (bill.bill_type, bill.target_name)
+        prev = existing_key_map.get(key)
+        if not prev or bill.id > prev.id:
+            existing_key_map[key] = bill
     created = 0
+    updated = 0
     for target, amount in channel_sum.items():
-        latest = db.scalar(
-            select(Bill).where(Bill.bill_type == BillType.channel, Bill.period == period, Bill.target_name == target).order_by(Bill.version.desc())
-        )
-        version = (latest.version + 1) if (latest and force_new_version) else 1 if not latest else latest.version
-        db.add(Bill(bill_type=BillType.channel, period=period, target_name=target, amount=amount, version=version))
+        key = (BillType.channel, target)
+        existing = existing_key_map.get(key)
+        if existing:
+            if overwrite:
+                existing.amount = amount
+                updated += 1
+            continue
+        db.add(Bill(bill_type=BillType.channel, period=period, target_name=target, amount=amount, version=1))
         created += 1
     for target, amount in rd_sum.items():
-        latest = db.scalar(
-            select(Bill).where(Bill.bill_type == BillType.rd, Bill.period == period, Bill.target_name == target).order_by(Bill.version.desc())
-        )
-        version = (latest.version + 1) if (latest and force_new_version) else 1 if not latest else latest.version
-        db.add(Bill(bill_type=BillType.rd, period=period, target_name=target, amount=amount, version=version))
+        key = (BillType.rd, target)
+        existing = existing_key_map.get(key)
+        if existing:
+            if overwrite:
+                existing.amount = amount
+                updated += 1
+            continue
+        db.add(Bill(bill_type=BillType.rd, period=period, target_name=target, amount=amount, version=1))
         created += 1
-    write_system_audit(db, _["user"], "generate_bills", "bill", period, f"生成账单数量: {created}")
+    audit_action = "regenerate_bills" if overwrite else "generate_bills"
+    write_system_audit(db, _["user"], audit_action, "bill", period, f"生成账单: 新增{created}, 更新{updated}")
     db.commit()
-    return {"created_bills": created}
+    return {"created_bills": created, "updated_bills": updated, "overwrite": overwrite}
 
 
 @app.get("/billing/bills")
