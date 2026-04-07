@@ -585,6 +585,11 @@ class BillStatusIn(BaseModel):
     note: str = ""
 
 
+class CleanupDuplicateBillsIn(BaseModel):
+    # 安全起见默认预览；确认无误后传 false 执行真实删除
+    dry_run: bool = True
+
+
 class InvoiceIn(BaseModel):
     invoice_no: str
     bill_id: int
@@ -2459,6 +2464,103 @@ def get_bill_detail(
             "latest_receipt_date": str(latest_receipt.received_at) if latest_receipt else "",
             "receipt_status": receipt_status,
         },
+    }
+
+
+@app.post("/billing/cleanup-duplicates")
+def cleanup_duplicate_bills(
+    payload: CleanupDuplicateBillsIn,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin])),
+):
+    rows = db.scalars(select(Bill).order_by(Bill.created_at.asc(), Bill.id.asc())).all()
+    grouped: dict[tuple[str, BillType, str], list[Bill]] = {}
+    for row in rows:
+        key = (row.period, row.bill_type, row.target_name)
+        grouped.setdefault(key, []).append(row)
+    duplicate_groups = {k: v for k, v in grouped.items() if len(v) > 1}
+    deleted_ids: list[int] = []
+    kept_groups: list[dict] = []
+    skipped: list[dict] = []
+
+    def can_delete_safely(bill: Bill) -> tuple[bool, str]:
+        # 仅清理：草稿 + 未回款 + 无下游依赖
+        if bill.status != BillStatus.draft:
+            return False, f"账单状态非草稿({bill.status.value})"
+        if bill.collection_status != CollectionStatus.pending:
+            return False, f"回款状态非待回款({bill.collection_status.value})"
+        invoice_count = int(db.scalar(select(func.count(Invoice.id)).where(Invoice.bill_id == bill.id)) or 0)
+        if invoice_count > 0:
+            return False, "存在关联发票"
+        receipt_count = int(db.scalar(select(func.count(Receipt.id)).where(Receipt.bill_id == bill.id)) or 0)
+        if receipt_count > 0:
+            return False, "存在关联回款"
+        delivery_count = int(db.scalar(select(func.count(BillDeliveryLog.id)).where(BillDeliveryLog.bill_id == bill.id)) or 0)
+        if delivery_count > 0:
+            return False, "存在发送/交付记录"
+        audit_count = int(
+            db.scalar(
+                select(func.count(SystemAuditLog.id)).where(
+                    SystemAuditLog.target_type == "bill",
+                    SystemAuditLog.target_id == str(bill.id),
+                )
+            )
+            or 0
+        )
+        if audit_count > 0:
+            return False, "存在账单审计依赖"
+        return True, ""
+
+    for (period, bill_type, target_name), bills in duplicate_groups.items():
+        sorted_bills = sorted(bills, key=lambda x: (x.created_at or dt.datetime.min, x.id))
+        keep = sorted_bills[0]
+        kept_groups.append(
+            {
+                "period": period,
+                "bill_type": bill_type.value if isinstance(bill_type, BillType) else str(bill_type),
+                "target_name": target_name,
+                "keep_id": keep.id,
+                "group_size": len(sorted_bills),
+            }
+        )
+        for candidate in sorted_bills[1:]:
+            ok, reason = can_delete_safely(candidate)
+            if not ok:
+                skipped.append(
+                    {
+                        "bill_id": candidate.id,
+                        "period": period,
+                        "bill_type": bill_type.value if isinstance(bill_type, BillType) else str(bill_type),
+                        "target_name": target_name,
+                        "reason": reason,
+                    }
+                )
+                continue
+            deleted_ids.append(candidate.id)
+            if not payload.dry_run:
+                db.delete(candidate)
+
+    write_system_audit(
+        db,
+        ctx["user"],
+        "cleanup_duplicate_bills",
+        "bill",
+        "",
+        f"重复账单清理 dry_run={payload.dry_run}: 删除候选{len(deleted_ids)}, 分组{len(kept_groups)}, 跳过{len(skipped)}",
+    )
+    if not payload.dry_run:
+        db.commit()
+    else:
+        db.rollback()
+    return {
+        "dry_run": payload.dry_run,
+        "duplicate_group_count": len(kept_groups),
+        "kept_group_count": len(kept_groups),
+        "deleted_count": len(deleted_ids),
+        "deleted_ids": deleted_ids,
+        "kept_groups": kept_groups,
+        "skipped_count": len(skipped),
+        "skipped": skipped,
     }
 
 
