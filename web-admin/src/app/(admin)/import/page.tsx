@@ -92,6 +92,7 @@ export default function ImportPage() {
   const [channelCol, setChannelCol] = useState<string>("");
   const [amountCol, setAmountCol] = useState<string>("");
   const [extractRows, setExtractRows] = useState<ExtractRow[]>([]);
+  const [onlyShowExtractErrors, setOnlyShowExtractErrors] = useState(false);
 
   useEffect(() => {
     apiRequest<OptionItem[]>("/channels")
@@ -106,6 +107,25 @@ export default function ImportPage() {
     const saved = localStorage.getItem("import_history");
     if (saved) {
       setHistory(JSON.parse(saved));
+    }
+    const manualDraft = localStorage.getItem("manual_import_draft");
+    if (manualDraft) {
+      try {
+        const draftRows = JSON.parse(manualDraft) as ManualRow[];
+        if (Array.isArray(draftRows) && draftRows.length > 0) {
+          setManualRows(draftRows);
+        }
+      } catch {}
+    }
+    const mappingDraft = localStorage.getItem("extract_mapping_draft");
+    if (mappingDraft) {
+      try {
+        const draft = JSON.parse(mappingDraft) as { gameCol?: string; channelCol?: string; amountCol?: string; titleRow?: number };
+        if (draft.gameCol) setGameCol(draft.gameCol);
+        if (draft.channelCol) setChannelCol(draft.channelCol);
+        if (draft.amountCol) setAmountCol(draft.amountCol);
+        if (typeof draft.titleRow === "number") setTitleRow(draft.titleRow);
+      } catch {}
     }
   }, []);
 
@@ -234,6 +254,14 @@ export default function ImportPage() {
       });
     setManualRows(rows);
   };
+  const clearManualRows = () => {
+    setManualRows([{ key: Date.now() }]);
+    localStorage.removeItem("manual_import_draft");
+  };
+  const saveManualDraft = () => {
+    localStorage.setItem("manual_import_draft", JSON.stringify(manualRows));
+    message.success("草稿已保存");
+  };
 
   const downloadTemplate = () => {
     const csv = "channel_name,game_name,gross_amount\n渠道A,游戏X,100000\n";
@@ -295,9 +323,9 @@ export default function ImportPage() {
       const header = (data.header || []).map((x) => String(x || "").trim());
       setRawHeader(header);
       setRawBody(data.body || []);
-      setGameCol(header[0] || "");
-      setChannelCol(header[1] || "");
-      setAmountCol(header[2] || "");
+      if (!gameCol) setGameCol(header[0] || "");
+      if (!channelCol) setChannelCol(header[1] || "");
+      if (!amountCol) setAmountCol(header[2] || "");
     } catch (e) {
       message.error((e as Error).message);
     } finally {
@@ -319,6 +347,10 @@ export default function ImportPage() {
       setLoading(true);
       const data = await apiRequestDirect<{ rows: ExtractRow[] }>("/api/recon/preview", "POST", fd, true);
       setExtractRows(data.rows || []);
+      localStorage.setItem(
+        "extract_mapping_draft",
+        JSON.stringify({ gameCol, channelCol, amountCol, titleRow })
+      );
     } catch (e) {
       message.error((e as Error).message);
     } finally {
@@ -358,6 +390,8 @@ export default function ImportPage() {
   const manualErrCount = checkedManualRows.filter((r) => r.status === "异常").length;
   const extractTotal = extractRows.reduce((sum, x) => sum + (x.gross_amount || 0), 0);
   const extractErr = extractRows.filter((x) => !!x.error).length;
+  const extractOk = extractRows.length - extractErr;
+  const extractRowsShown = onlyShowExtractErrors ? extractRows.filter((x) => !!x.error) : extractRows;
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
@@ -455,6 +489,8 @@ export default function ImportPage() {
                     <Button icon={<PlusOutlined />} onClick={addRow}>
                       新增行
                     </Button>
+                    <Button onClick={clearManualRows}>清空当前录入</Button>
+                    <Button onClick={saveManualDraft}>保存草稿到本地</Button>
                     <Button type="primary" onClick={submitManual}>
                       提交数据
                     </Button>
@@ -578,9 +614,20 @@ export default function ImportPage() {
                   {!!extractRows.length && (
                     <Card size="small" title="标准化结果预览">
                       <RowStats total={extractRows.length} errors={extractErr} amount={extractTotal} />
+                      <div style={{ marginBottom: 8 }}>
+                        正常行数：{extractOk} 行
+                      </div>
+                      <Space style={{ marginBottom: 8 }}>
+                        <Button size="small" onClick={() => setOnlyShowExtractErrors(false)} type={!onlyShowExtractErrors ? "primary" : "default"}>
+                          预览全部
+                        </Button>
+                        <Button size="small" onClick={() => setOnlyShowExtractErrors(true)} type={onlyShowExtractErrors ? "primary" : "default"}>
+                          仅预览异常行
+                        </Button>
+                      </Space>
                       <Table
                         rowKey={(r) => `${r.__rowNum__}-${r.game_name}-${r.channel_name}`}
-                        dataSource={extractRows}
+                        dataSource={extractRowsShown}
                         rowClassName={(r) => (r.error ? "row-error" : "")}
                         pagination={{ pageSize: 10 }}
                         columns={[

@@ -46,11 +46,13 @@ export async function POST(request: NextRequest) {
 
   const role = request.headers.get("x-role") || "finance";
   const user = request.headers.get("x-user") || "finance_user";
+  const authorization = request.headers.get("authorization");
   const resp = await fetch(`${backendBase}/recon/import?period=${encodeURIComponent(period)}`, {
     method: "POST",
     headers: {
       "x-role": role,
       "x-user": user,
+      ...(authorization ? { authorization } : {}),
     },
     body: formData,
   });

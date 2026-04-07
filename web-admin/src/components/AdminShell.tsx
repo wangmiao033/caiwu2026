@@ -5,14 +5,17 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   AppstoreOutlined,
   CheckCircleOutlined,
+  ClusterOutlined,
   DollarOutlined,
   FileExcelOutlined,
   FileTextOutlined,
+  GiftOutlined,
   HomeOutlined,
   LogoutOutlined,
   MoneyCollectOutlined,
   ReconciliationOutlined,
   SettingOutlined,
+  ShopOutlined,
 } from "@ant-design/icons";
 import { Button, Layout, Menu, Space, Typography } from "antd";
 
@@ -20,6 +23,9 @@ const { Header, Sider, Content } = Layout;
 
 const menuItems = [
   { key: "/home", icon: <HomeOutlined />, label: "首页看板" },
+  { key: "/channels", icon: <ShopOutlined />, label: "渠道管理" },
+  { key: "/games", icon: <GiftOutlined />, label: "游戏管理" },
+  { key: "/channel-game-map", icon: <ClusterOutlined />, label: "渠道游戏映射" },
   { key: "/import", icon: <FileExcelOutlined />, label: "Excel导入" },
   { key: "/recon-tasks", icon: <CheckCircleOutlined />, label: "核对任务" },
   { key: "/billing", icon: <ReconciliationOutlined />, label: "账单管理" },
@@ -63,6 +69,7 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
             <Button
               icon={<LogoutOutlined />}
               onClick={() => {
+                localStorage.removeItem("access_token");
                 localStorage.removeItem("fake_token");
                 router.replace("/login");
               }}

@@ -7,7 +7,9 @@ from decimal import Decimal
 from typing import Optional
 
 import pandas as pd
+import jwt
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import (
     Date,
@@ -38,6 +40,9 @@ def resolve_database_url() -> str:
 DATABASE_URL = resolve_database_url()
 engine = create_engine(DATABASE_URL, echo=False, future=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+JWT_SECRET = os.getenv("JWT_SECRET", "change-this-secret")
+JWT_EXPIRE_DAYS = int(os.getenv("JWT_EXPIRE_DAYS", "7"))
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 class Base(DeclarativeBase):
@@ -86,6 +91,14 @@ class User(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(50), unique=True, index=True)
     role: Mapped[Role] = mapped_column(Enum(Role))
+
+
+LOCAL_USERS = {
+    "admin": {"password": "123456", "role": Role.admin},
+    "finance": {"password": "123456", "role": Role.finance},
+    "biz": {"password": "123456", "role": Role.biz},
+    "ops": {"password": "123456", "role": Role.ops},
+}
 
 
 class Channel(Base):
@@ -226,6 +239,11 @@ class RuleIn(BaseModel):
     default_ratio: Decimal
 
 
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+
 class BillStatusIn(BaseModel):
     status: BillStatus
     note: str = ""
@@ -271,17 +289,35 @@ def get_db():
         db.close()
 
 
+def build_token(username: str, role: Role) -> str:
+    expire_at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=JWT_EXPIRE_DAYS)
+    payload = {"sub": username, "role": role.value, "exp": expire_at}
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+
+def unauthorized(message: str = "未登录或登录已过期"):
+    return HTTPException(status_code=401, detail={"code": 401, "message": message})
+
+
 def require_role(roles: list[Role]):
-    def checker(x_role: str = Header(default="ops"), x_user: str = Header(default="system"), db: Session = Depends(get_db)):
+    def checker(
+        credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+        x_user: str = Header(default="system"),
+        db: Session = Depends(get_db),
+    ):
+        if not credentials or credentials.scheme.lower() != "bearer":
+            raise unauthorized()
         try:
-            current_role = Role(x_role)
-        except ValueError as e:
-            raise HTTPException(status_code=403, detail="非法角色") from e
+            payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=["HS256"])
+            current_role = Role(payload.get("role", "ops"))
+            token_user = payload.get("sub", x_user)
+        except Exception as e:
+            raise unauthorized() from e
         if current_role not in roles:
             raise HTTPException(status_code=403, detail="无权限")
-        db.add(AuditLog(actor=x_user, action="api_call", target=f"role={current_role.value}"))
+        db.add(AuditLog(actor=token_user, action="api_call", target=f"role={current_role.value}"))
         db.commit()
-        return {"user": x_user, "role": current_role}
+        return {"user": token_user, "role": current_role}
 
     return checker
 
@@ -321,6 +357,15 @@ def root():
     return {"name": "内部对账系统", "phase": "1-3 已实现基础闭环", "docs": "/docs"}
 
 
+@app.post("/login")
+def login(payload: LoginIn):
+    user = LOCAL_USERS.get(payload.username)
+    if not user or user["password"] != payload.password:
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "用户名或密码错误"})
+    token = build_token(payload.username, user["role"])
+    return {"access_token": token, "token_type": "bearer"}
+
+
 @app.post("/channels")
 def create_channel(payload: ChannelIn, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.biz, Role.ops]))):
     channel = Channel(name=payload.name)
@@ -334,6 +379,26 @@ def list_channels(db: Session = Depends(get_db), _: dict = Depends(require_role(
     return db.scalars(select(Channel).order_by(Channel.id.desc())).all()
 
 
+@app.put("/channels/{channel_id}")
+def update_channel(channel_id: int, payload: ChannelIn, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.biz]))):
+    row = db.get(Channel, channel_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="渠道不存在")
+    row.name = payload.name
+    db.commit()
+    return {"id": row.id, "name": row.name}
+
+
+@app.delete("/channels/{channel_id}")
+def delete_channel(channel_id: int, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin]))):
+    row = db.get(Channel, channel_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="渠道不存在")
+    db.delete(row)
+    db.commit()
+    return {"id": channel_id, "deleted": True}
+
+
 @app.post("/games")
 def create_game(payload: GameIn, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.biz, Role.ops]))):
     game = Game(name=payload.name, rd_company=payload.rd_company)
@@ -345,6 +410,27 @@ def create_game(payload: GameIn, db: Session = Depends(get_db), _: dict = Depend
 @app.get("/games")
 def list_games(db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops]))):
     return db.scalars(select(Game).order_by(Game.id.desc())).all()
+
+
+@app.put("/games/{game_id}")
+def update_game(game_id: int, payload: GameIn, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.biz]))):
+    row = db.get(Game, game_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="游戏不存在")
+    row.name = payload.name
+    row.rd_company = payload.rd_company
+    db.commit()
+    return {"id": row.id, "name": row.name}
+
+
+@app.delete("/games/{game_id}")
+def delete_game(game_id: int, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin]))):
+    row = db.get(Game, game_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="游戏不存在")
+    db.delete(row)
+    db.commit()
+    return {"id": game_id, "deleted": True}
 
 
 @app.post("/channel-game-map")
@@ -373,6 +459,29 @@ def list_map(db: Session = Depends(get_db), _: dict = Depends(require_role([Role
         }
         for x in rows
     ]
+
+
+@app.put("/channel-game-map/{map_id}")
+def update_map(map_id: int, payload: MapIn, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.biz]))):
+    row = db.get(ChannelGameMap, map_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="映射不存在")
+    row.channel_id = payload.channel_id
+    row.game_id = payload.game_id
+    row.revenue_share_ratio = payload.revenue_share_ratio
+    row.rd_settlement_ratio = payload.rd_settlement_ratio
+    db.commit()
+    return {"id": row.id}
+
+
+@app.delete("/channel-game-map/{map_id}")
+def delete_map(map_id: int, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin]))):
+    row = db.get(ChannelGameMap, map_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="映射不存在")
+    db.delete(row)
+    db.commit()
+    return {"id": map_id, "deleted": True}
 
 
 @app.post("/recon/import")
@@ -471,12 +580,35 @@ def list_recon(db: Session = Depends(get_db), _: dict = Depends(require_role([Ro
     return [{"id": x.id, "period": x.period, "status": x.status} for x in tasks]
 
 
+@app.get("/recon/issues")
+def list_recon_issues(task_id: int = Query(...), db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.ops]))):
+    rows = db.scalars(select(ReconIssue).where(ReconIssue.recon_task_id == task_id).order_by(ReconIssue.id.desc())).all()
+    return rows
+
+
 @app.post("/billing/rules")
 def create_rule(payload: RuleIn, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance]))):
     rule = BillingRule(**payload.model_dump())
     db.add(rule)
     db.commit()
     return {"id": rule.id}
+
+
+@app.get("/billing/rules")
+def list_rules(db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz]))):
+    return db.scalars(select(BillingRule).order_by(BillingRule.id.desc())).all()
+
+
+@app.put("/billing/rules/{rule_id}")
+def update_rule(rule_id: int, payload: RuleIn, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance]))):
+    row = db.get(BillingRule, rule_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="规则不存在")
+    row.name = payload.name
+    row.bill_type = payload.bill_type
+    row.default_ratio = payload.default_ratio
+    db.commit()
+    return {"id": row.id}
 
 
 @app.post("/billing/generate")
@@ -568,6 +700,21 @@ def list_invoices(db: Session = Depends(get_db), _: dict = Depends(require_role(
     return rows
 
 
+@app.put("/invoices/{invoice_id}")
+def update_invoice(invoice_id: int, payload: InvoiceIn, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance]))):
+    row = db.get(Invoice, invoice_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="发票不存在")
+    row.invoice_no = payload.invoice_no
+    row.bill_id = payload.bill_id
+    row.issue_date = payload.issue_date
+    row.amount_without_tax = payload.amount_without_tax
+    row.tax_amount = payload.tax_amount
+    row.total_amount = payload.total_amount
+    db.commit()
+    return {"id": row.id}
+
+
 @app.post("/receipts")
 def register_receipt(payload: ReceiptIn, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance]))):
     bill = db.get(Bill, payload.bill_id)
@@ -585,6 +732,25 @@ def register_receipt(payload: ReceiptIn, db: Session = Depends(get_db), _: dict 
         bill.collection_status = CollectionStatus.pending
     db.commit()
     return {"receipt_id": receipt.id, "collection_status": bill.collection_status}
+
+
+@app.get("/receipts")
+def list_receipts(db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz]))):
+    return db.scalars(select(Receipt).order_by(Receipt.id.desc())).all()
+
+
+@app.put("/receipts/{receipt_id}")
+def update_receipt(receipt_id: int, payload: ReceiptIn, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance]))):
+    row = db.get(Receipt, receipt_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="回款不存在")
+    row.bill_id = payload.bill_id
+    row.received_at = payload.received_at
+    row.amount = payload.amount
+    row.bank_ref = payload.bank_ref
+    row.account_name = payload.account_name
+    db.commit()
+    return {"id": row.id}
 
 
 @app.get("/dashboard/finance")

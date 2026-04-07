@@ -14,10 +14,15 @@ type FinanceRes = {
 
 export default function FinancePage() {
   const [data, setData] = useState<FinanceRes>({ total_receivable: 0, total_received: 0, outstanding: 0, status_breakdown: {} });
+  const [invoiceCount, setInvoiceCount] = useState(0);
+  const [receiptCount, setReceiptCount] = useState(0);
 
   const load = async () => {
     const d = await apiRequest<FinanceRes>("/dashboard/finance");
     setData(d);
+    const [invoices, receipts] = await Promise.all([apiRequest<unknown[]>("/invoices"), apiRequest<unknown[]>("/receipts")]);
+    setInvoiceCount(invoices.length);
+    setReceiptCount(receipts.length);
   };
 
   const chartData = Object.entries(data.status_breakdown || {}).map(([name, value]) => ({ name, value }));
@@ -31,6 +36,8 @@ export default function FinancePage() {
         <Col span={8}><Card><Statistic title="应收" value={data.total_receivable || 0} precision={2} /></Card></Col>
         <Col span={8}><Card><Statistic title="已收" value={data.total_received || 0} precision={2} /></Card></Col>
         <Col span={8}><Card><Statistic title="未收" value={data.outstanding || 0} precision={2} /></Card></Col>
+        <Col span={8} style={{ marginTop: 16 }}><Card><Statistic title="发票数量" value={invoiceCount} /></Card></Col>
+        <Col span={8} style={{ marginTop: 16 }}><Card><Statistic title="回款数量" value={receiptCount} /></Card></Col>
       </Row>
       <Card title="回款状态分布" style={{ marginTop: 16 }}>
         <Column data={chartData} xField="name" yField="value" />

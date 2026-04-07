@@ -8,8 +8,12 @@ async function forward(request: NextRequest, path: string[]) {
   const headers = new Headers();
   const role = request.headers.get("x-role") || "finance";
   const user = request.headers.get("x-user") || "finance_user";
+  const authorization = request.headers.get("authorization");
   headers.set("x-role", role);
   headers.set("x-user", user);
+  if (authorization) {
+    headers.set("authorization", authorization);
+  }
 
   let body: BodyInit | undefined;
   if (method !== "GET" && method !== "HEAD") {
@@ -42,6 +46,16 @@ export async function GET(request: NextRequest, context: { params: Promise<{ pat
 }
 
 export async function POST(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
+  const { path } = await context.params;
+  return forward(request, path);
+}
+
+export async function PUT(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
+  const { path } = await context.params;
+  return forward(request, path);
+}
+
+export async function DELETE(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
   const { path } = await context.params;
   return forward(request, path);
 }
