@@ -16,13 +16,17 @@ export default function LoginPage() {
     }
   }, [router]);
 
-  const onFinish = async (values: { username: string; password: string }) => {
+  const onFinish = async (values: { email: string; password: string }) => {
     setLoading(true);
     try {
-      const data = await apiRequest<{ access_token: string; token_type: string; role?: string }>("/login", "POST", values);
+      const data = await apiRequest<{
+        access_token: string;
+        token_type: string;
+        user?: { email: string; role: string; is_active: boolean };
+      }>("/auth/login", "POST", values);
       localStorage.setItem("access_token", data.access_token);
-      localStorage.setItem("x_user", values.username);
-      localStorage.setItem("x_role", data.role || "finance_manager");
+      localStorage.setItem("x_user", data.user?.email || values.email);
+      localStorage.setItem("x_role", data.user?.role || "finance_manager");
       router.replace("/home");
     } catch (e) {
       message.error((e as Error).message);
@@ -33,11 +37,11 @@ export default function LoginPage() {
 
   return (
     <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#f5f7fa" }}>
-      <Card title="公司内部对账后台" style={{ width: 420 }}>
-        <Typography.Paragraph type="secondary">公司内部登录（当前为简化账号体系）</Typography.Paragraph>
+      <Card title="公司内部财务后台登录" style={{ width: 420 }}>
+        <Typography.Paragraph type="secondary">邮箱登录</Typography.Paragraph>
         <Form layout="vertical" onFinish={onFinish}>
-          <Form.Item label="用户名" name="username" rules={[{ required: true, message: "请输入用户名" }]}>
-            <Input placeholder="admin" />
+          <Form.Item label="邮箱" name="email" rules={[{ required: true, message: "请输入邮箱" }, { type: "email", message: "邮箱格式不正确" }]}>
+            <Input placeholder="name@example.com" />
           </Form.Item>
           <Form.Item label="密码" name="password" rules={[{ required: true, message: "请输入密码" }]}>
             <Input.Password placeholder="123456" />

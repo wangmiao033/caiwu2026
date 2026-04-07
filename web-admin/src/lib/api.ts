@@ -23,6 +23,8 @@ function handleUnauthorized(status: number) {
   if (status === 401 && typeof window !== "undefined") {
     localStorage.removeItem("access_token");
     localStorage.removeItem("fake_token");
+    localStorage.removeItem("x_role");
+    localStorage.removeItem("x_user");
     window.location.href = "/login";
   }
 }

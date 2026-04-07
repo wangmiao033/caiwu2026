@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import datetime as dt
 import enum
+import json
 import os
 from decimal import Decimal
+from urllib import error as url_error
+from urllib import request as url_request
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -60,6 +63,8 @@ engine = create_engine(DATABASE_URL, **engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 JWT_SECRET = os.getenv("JWT_SECRET", "change-this-secret")
 JWT_EXPIRE_DAYS = int(os.getenv("JWT_EXPIRE_DAYS", "7"))
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "").strip()
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
@@ -377,6 +382,16 @@ class SystemAuditLog(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now(), index=True)
 
 
+class UserProfile(Base):
+    __tablename__ = "user_profiles"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    role: Mapped[Role] = mapped_column(Enum(Role), index=True)
+    is_active: Mapped[bool] = mapped_column(default=True, index=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
+
+
 class ExceptionHandleStatus(str, enum.Enum):
     pending = "pending"
     ignored = "ignored"
@@ -505,6 +520,11 @@ class LoginIn(BaseModel):
     password: str
 
 
+class AuthLoginIn(BaseModel):
+    email: str
+    password: str
+
+
 class BillStatusIn(BaseModel):
     status: BillStatus
     note: str = ""
@@ -593,9 +613,9 @@ def get_db():
         db.close()
 
 
-def build_token(username: str, role: Role) -> str:
+def build_token(subject: str, role: Role) -> str:
     expire_at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=JWT_EXPIRE_DAYS)
-    payload = {"sub": username, "role": role.value, "exp": expire_at}
+    payload = {"sub": subject, "role": role.value, "exp": expire_at}
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
 
@@ -631,6 +651,37 @@ def write_system_audit(
             created_at=dt.datetime.now(),
         )
     )
+
+
+def supabase_sign_in(email: str, password: str) -> dict:
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise HTTPException(status_code=500, detail="Supabase 配置缺失，请设置 SUPABASE_URL / SUPABASE_ANON_KEY")
+    url = f"{SUPABASE_URL}/auth/v1/token?grant_type=password"
+    payload = json.dumps({"email": email, "password": password}).encode("utf-8")
+    req = url_request.Request(
+        url,
+        method="POST",
+        data=payload,
+        headers={
+            "apikey": SUPABASE_ANON_KEY,
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with url_request.urlopen(req, timeout=15) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except url_error.HTTPError as e:
+        body = e.read().decode("utf-8") if hasattr(e, "read") else ""
+        try:
+            parsed = json.loads(body) if body else {}
+        except Exception:
+            parsed = {}
+        if e.code in (400, 401):
+            raise HTTPException(status_code=401, detail="邮箱或密码错误") from e
+        raise HTTPException(status_code=502, detail=f"Supabase 登录失败: {parsed.get('error_description') or parsed.get('msg') or 'unknown'}") from e
+    except Exception as e:
+        raise HTTPException(status_code=502, detail="认证服务连接失败") from e
 
 
 def require_role(roles: list[Role]):
@@ -678,6 +729,15 @@ def create_default_data(db: Session):
             [
                 BillingRule(name="默认渠道分成", bill_type=BillType.channel, default_ratio=Decimal("0.3000")),
                 BillingRule(name="默认研发结算", bill_type=BillType.rd, default_ratio=Decimal("0.5000")),
+            ]
+        )
+    if db.scalar(select(func.count(UserProfile.id))) == 0:
+        db.add_all(
+            [
+                UserProfile(email="wangmiao@dxyx6888.com", role=Role.admin, is_active=True),
+                UserProfile(email="caiwu@dxyx6888.com", role=Role.finance_manager, is_active=True),
+                UserProfile(email="pingce@dxyx6888.com", role=Role.ops_manager, is_active=True),
+                UserProfile(email="515658123@qq.com", role=Role.tech, is_active=True),
             ]
         )
     db.commit()
@@ -775,15 +835,54 @@ def root():
     return {"name": "内部对账系统", "phase": "1-3 已实现基础闭环", "docs": "/docs"}
 
 
-@app.post("/login")
-def login(payload: LoginIn, db: Session = Depends(get_db)):
-    user = LOCAL_USERS.get(payload.username)
-    if not user or user["password"] != payload.password:
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "用户名或密码错误"})
-    token = build_token(payload.username, user["role"])
-    write_system_audit(db, payload.username, "login_success", "auth", payload.username, "登录成功")
+def _perform_auth_login(email: str, password: str, db: Session):
+    email = (email or "").strip().lower()
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="邮箱和密码不能为空")
+    supabase_resp = supabase_sign_in(email, password)
+    supabase_user = supabase_resp.get("user") or {}
+    auth_email = (supabase_user.get("email") or email).strip().lower()
+    profile = db.scalar(select(UserProfile).where(UserProfile.email == auth_email))
+    if not profile:
+        raise HTTPException(status_code=403, detail="未分配系统角色")
+    if not profile.is_active:
+        raise HTTPException(status_code=403, detail="账号已停用")
+    role = normalize_role(profile.role)
+    token = build_token(auth_email, role)
+    write_system_audit(db, auth_email, "login_success", "auth", auth_email, "Supabase 邮箱登录成功")
     db.commit()
-    return {"access_token": token, "token_type": "bearer", "role": normalize_role(user["role"]).value}
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {
+            "email": auth_email,
+            "role": role.value,
+            "is_active": profile.is_active,
+        },
+    }
+
+
+@app.post("/auth/login")
+def auth_login(payload: AuthLoginIn, db: Session = Depends(get_db)):
+    return _perform_auth_login(payload.email, payload.password, db)
+
+
+@app.post("/login")
+def login_compat(payload: LoginIn, db: Session = Depends(get_db)):
+    # 兼容旧前端字段（username），底层统一走 Supabase 邮箱登录
+    return _perform_auth_login(payload.username, payload.password, db)
+
+
+@app.get("/auth/me")
+def auth_me(ctx: dict = Depends(require_roles([Role.admin, Role.finance_manager, Role.ops_manager, Role.tech])), db: Session = Depends(get_db)):
+    email = (ctx["user"] or "").strip().lower()
+    profile = db.scalar(select(UserProfile).where(UserProfile.email == email))
+    if not profile:
+        raise HTTPException(status_code=403, detail="未分配系统角色")
+    if not profile.is_active:
+        raise HTTPException(status_code=403, detail="账号已停用")
+    role = normalize_role(profile.role)
+    return {"email": email, "role": role.value, "is_active": profile.is_active}
 
 
 @app.post("/channels")
