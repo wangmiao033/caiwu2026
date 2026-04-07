@@ -26,7 +26,6 @@ type BillRow = {
   channel_fee?: number;
   tax_rate?: number;
   rd_share?: number;
-  private_rate?: number;
   settlement_amount?: number;
   profit?: number;
 };
@@ -162,7 +161,6 @@ export default function BillingPage() {
       通道费金额: x.trial?.channelFeeAmount ?? "",
       税额: x.trial?.taxAmount ?? "",
       研发分成金额: x.trial?.rdShareAmount ?? "",
-      私点金额: x.trial?.privateAmount ?? "",
       试算结算金额: x.trial?.settlementAmount ?? "",
       试算利润: x.trial?.profit ?? "",
       发送状态: x.status,
@@ -235,7 +233,6 @@ export default function BillingPage() {
             { title: "通道费(预留)", dataIndex: "channel_fee", render: (v: number) => v ?? "-" },
             { title: "税点(预留)", dataIndex: "tax_rate", render: (v: number) => v ?? "-" },
             { title: "研发分成(预留)", dataIndex: "rd_share", render: (v: number) => v ?? "-" },
-            { title: "私点(预留)", dataIndex: "private_rate", render: (v: number) => v ?? "-" },
             { title: "金额", dataIndex: "amount" },
             { title: "开票状态", dataIndex: "invoice_status", render: (v: string) => <Tag color={v === "已开票" ? "green" : "orange"}>{v || "-"}</Tag> },
             { title: "结算金额(预留)", dataIndex: "settlement_amount", render: (v: number) => v ?? "-" },
@@ -251,7 +248,6 @@ export default function BillingPage() {
                   { title: "通道费金额", dataIndex: ["trial", "channelFeeAmount"], render: (v: number) => (v ?? "-") },
                   { title: "税额", dataIndex: ["trial", "taxAmount"], render: (v: number) => (v ?? "-") },
                   { title: "研发分成金额", dataIndex: ["trial", "rdShareAmount"], render: (v: number) => (v ?? "-") },
-                  { title: "私点金额", dataIndex: ["trial", "privateAmount"], render: (v: number) => (v ?? "-") },
                   { title: "试算结算金额", dataIndex: ["trial", "settlementAmount"], render: (v: number) => (v ?? "-") },
                   { title: "试算利润", dataIndex: ["trial", "profit"], render: (v: number) => (v ?? "-") },
                 ]
@@ -297,7 +293,7 @@ export default function BillingPage() {
               <Descriptions.Item label="回款状态">{detail.receipt_status || detail.collection_status || "-"}</Descriptions.Item>
               <Descriptions.Item label="规则来源说明">
                 当前账单规则来自系统“规则配置”页（游戏+渠道维度）。<br />
-                折扣/通道费/税点/研发分成/私点将作为自动计算依据。<br />
+                折扣/通道费/税点/研发分成将作为自动计算依据。<br />
                 当前接口若未返回明细字段，则前端展示预留列，待后端逐步补全。
               </Descriptions.Item>
             </Descriptions>
@@ -308,11 +304,10 @@ export default function BillingPage() {
                 <Descriptions.Item label="通道费金额">{detailTrial?.channelFeeAmount ?? "-"}</Descriptions.Item>
                 <Descriptions.Item label="税额">{detailTrial?.taxAmount ?? "-"}</Descriptions.Item>
                 <Descriptions.Item label="研发分成金额">{detailTrial?.rdShareAmount ?? "-"}</Descriptions.Item>
-                <Descriptions.Item label="私点金额">{detailTrial?.privateAmount ?? "-"}</Descriptions.Item>
                 <Descriptions.Item label="试算结算金额">{detailTrial?.settlementAmount ?? "-"}</Descriptions.Item>
                 <Descriptions.Item label="试算利润">{detailTrial?.profit ?? "-"}</Descriptions.Item>
                 <Descriptions.Item label="公式说明">
-                  折扣后流水=原流水*折扣系数；通道费金额=折扣后流水*通道费比例；税额=折扣后流水*税点比例；研发分成金额=折扣后流水*研发分成比例；私点金额=折扣后流水*私点比例；试算结算金额=折扣后流水-通道费金额-税额-研发分成金额-私点金额；试算利润=试算结算金额。
+                  折扣后流水=原流水*折扣系数；通道费金额=折扣后流水*通道费比例；税额=折扣后流水*税点比例；研发分成金额=折扣后流水*研发分成比例；试算结算金额=折扣后流水-通道费金额-税额-研发分成金额；试算利润=试算结算金额。
                 </Descriptions.Item>
               </Descriptions>
             </Card>
