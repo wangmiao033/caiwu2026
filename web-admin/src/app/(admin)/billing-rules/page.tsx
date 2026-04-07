@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Button, Card, Form, Input, InputNumber, Modal, Select, Space, Statistic, Switch, Table, Tag, Upload, message } from "antd";
+import { Button, Card, Form, Input, InputNumber, Modal, Result, Select, Space, Statistic, Switch, Table, Tag, Upload, message } from "antd";
 import { apiRequest } from "@/lib/api";
 import { buildExportFilename, exportRowsToXlsx } from "@/lib/export";
 import * as XLSX from "xlsx";
+import { getCurrentRole } from "@/lib/rbac";
 
 type SimpleItem = { id: number; name: string };
 type MapRow = { id: number; channel: string; game: string; revenue_share_ratio: number; rd_settlement_ratio: number };
@@ -45,6 +46,8 @@ const defaultRule = (): Omit<RuleRow, "key" | "channel" | "game"> => ({
 });
 
 export default function BillingRulesPage() {
+  const role = getCurrentRole();
+  const canAccess = role === "admin" || role === "finance_manager";
   const [channels, setChannels] = useState<SimpleItem[]>([]);
   const [games, setGames] = useState<SimpleItem[]>([]);
   const [maps, setMaps] = useState<MapRow[]>([]);
@@ -57,6 +60,10 @@ export default function BillingRulesPage() {
   const [importRows, setImportRows] = useState<RuleRow[]>([]);
   const [onlyErrors, setOnlyErrors] = useState(false);
   const [form] = Form.useForm();
+
+  if (!canAccess) {
+    return <Result status="403" title="403" subTitle="当前角色无权限访问规则配置页面" />;
+  }
 
   useEffect(() => {
     apiRequest<SimpleItem[]>("/channels").then(setChannels).catch(() => {});

@@ -69,6 +69,10 @@ class Base(DeclarativeBase):
 
 class Role(str, enum.Enum):
     admin = "admin"
+    finance_manager = "finance_manager"
+    ops_manager = "ops_manager"
+    tech = "tech"
+    # 兼容历史角色值，避免老 token / 老数据直接失效
     finance = "finance"
     biz = "biz"
     ops = "ops"
@@ -144,9 +148,12 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "123456")
 
 LOCAL_USERS = {
     ADMIN_USERNAME: {"password": ADMIN_PASSWORD, "role": Role.admin},
-    "finance": {"password": "123456", "role": Role.finance},
-    "biz": {"password": "123456", "role": Role.biz},
-    "ops": {"password": "123456", "role": Role.ops},
+    "finance_manager": {"password": "123456", "role": Role.finance_manager},
+    "ops_manager": {"password": "123456", "role": Role.ops_manager},
+    "tech": {"password": "123456", "role": Role.tech},
+    "finance": {"password": "123456", "role": Role.finance_manager},
+    "biz": {"password": "123456", "role": Role.tech},
+    "ops": {"password": "123456", "role": Role.ops_manager},
 }
 
 
@@ -596,6 +603,16 @@ def unauthorized(message: str = "未登录或登录已过期"):
     return HTTPException(status_code=401, detail={"code": 401, "message": message})
 
 
+def normalize_role(role: Role) -> Role:
+    if role == Role.finance:
+        return Role.finance_manager
+    if role == Role.ops:
+        return Role.ops_manager
+    if role == Role.biz:
+        return Role.tech
+    return role
+
+
 def write_system_audit(
     db: Session,
     operator: str,
@@ -617,6 +634,8 @@ def write_system_audit(
 
 
 def require_role(roles: list[Role]):
+    normalized_roles = {normalize_role(x) for x in roles}
+
     def checker(
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
         x_user: str = Header(default="system"),
@@ -626,11 +645,11 @@ def require_role(roles: list[Role]):
             raise unauthorized()
         try:
             payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=["HS256"])
-            current_role = Role(payload.get("role", "ops"))
+            current_role = normalize_role(Role(payload.get("role", "ops_manager")))
             token_user = payload.get("sub", x_user)
         except Exception as e:
             raise unauthorized() from e
-        if current_role not in roles:
+        if current_role not in normalized_roles:
             raise HTTPException(status_code=403, detail="无权限")
         db.add(AuditLog(actor=token_user, action="api_call", target=f"role={current_role.value}"))
         db.commit()
@@ -639,14 +658,19 @@ def require_role(roles: list[Role]):
     return checker
 
 
+def require_roles(roles: list[Role]):
+    # RBAC 别名，便于语义化调用
+    return require_role(roles)
+
+
 def create_default_data(db: Session):
     if db.scalar(select(func.count(User.id))) == 0:
         db.add_all(
             [
                 User(username="admin", role=Role.admin),
                 User(username="finance", role=Role.finance),
-                User(username="biz", role=Role.biz),
                 User(username="ops", role=Role.ops),
+                User(username="biz", role=Role.biz),
             ]
         )
     if db.scalar(select(func.count(BillingRule.id))) == 0:
@@ -759,7 +783,7 @@ def login(payload: LoginIn, db: Session = Depends(get_db)):
     token = build_token(payload.username, user["role"])
     write_system_audit(db, payload.username, "login_success", "auth", payload.username, "登录成功")
     db.commit()
-    return {"access_token": token, "token_type": "bearer"}
+    return {"access_token": token, "token_type": "bearer", "role": normalize_role(user["role"]).value}
 
 
 @app.post("/channels")
@@ -976,7 +1000,7 @@ def patch_project_status(
 def list_game_variants(
     project_id: Optional[int] = Query(default=None),
     db: Session = Depends(get_db),
-    _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops])),
+    _: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech])),
 ):
     stmt = select(GameVariant).order_by(GameVariant.id.desc())
     if project_id is not None:
@@ -985,7 +1009,7 @@ def list_game_variants(
 
 
 @app.post("/game-variants")
-def create_game_variant(payload: GameVariantIn, db: Session = Depends(get_db), ctx: dict = Depends(require_role([Role.admin, Role.biz, Role.ops]))):
+def create_game_variant(payload: GameVariantIn, db: Session = Depends(get_db), ctx: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech]))):
     if not db.get(Project, payload.project_id):
         raise HTTPException(status_code=400, detail="所属项目不存在")
     raw = (payload.raw_game_name or "").strip()
@@ -1023,7 +1047,7 @@ def update_game_variant(
     variant_id: int,
     payload: GameVariantIn,
     db: Session = Depends(get_db),
-    ctx: dict = Depends(require_role([Role.admin, Role.biz])),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech])),
 ):
     row = db.get(GameVariant, variant_id)
     if not row:
@@ -1061,7 +1085,7 @@ def patch_variant_status(
     variant_id: int,
     payload: VariantStatusPatch,
     db: Session = Depends(get_db),
-    ctx: dict = Depends(require_role([Role.admin, Role.biz])),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech])),
 ):
     row = db.get(GameVariant, variant_id)
     if not row:
@@ -1073,7 +1097,7 @@ def patch_variant_status(
 
 
 @app.post("/channel-game-map")
-def create_map(payload: MapIn, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.biz]))):
+def create_map(payload: MapIn, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech]))):
     exists = db.scalar(
         select(ChannelGameMap).where(ChannelGameMap.channel_id == payload.channel_id, ChannelGameMap.game_id == payload.game_id)
     )
@@ -1091,7 +1115,7 @@ def create_map(payload: MapIn, db: Session = Depends(get_db), _: dict = Depends(
 def bulk_create_map(
     payload: MapBulkCreateIn,
     db: Session = Depends(get_db),
-    ctx: dict = Depends(require_role([Role.admin, Role.biz])),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech])),
 ):
     success_count = 0
     failed_items = []
@@ -1134,7 +1158,7 @@ def bulk_create_map(
 
 
 @app.get("/channel-game-map")
-def list_map(db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops]))):
+def list_map(db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech]))):
     rows = db.scalars(select(ChannelGameMap).order_by(ChannelGameMap.id.desc())).all()
     return [
         {
@@ -1149,7 +1173,7 @@ def list_map(db: Session = Depends(get_db), _: dict = Depends(require_role([Role
 
 
 @app.put("/channel-game-map/{map_id}")
-def update_map(map_id: int, payload: MapIn, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.biz]))):
+def update_map(map_id: int, payload: MapIn, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech]))):
     row = db.get(ChannelGameMap, map_id)
     if not row:
         raise HTTPException(status_code=404, detail="映射不存在")
@@ -1179,7 +1203,7 @@ async def import_statement(
     import_type: str = Query(default="template"),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    ctx: dict = Depends(require_role([Role.admin, Role.finance, Role.ops])),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech])),
 ):
     content = await file.read()
     filename = (file.filename or "").lower()
@@ -1988,7 +2012,7 @@ def list_import_history(
     page: int = 1,
     page_size: int = 20,
     db: Session = Depends(get_db),
-    _: dict = Depends(require_role([Role.admin, Role.finance, Role.ops, Role.biz])),
+    _: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech])),
 ):
     rows = db.scalars(select(ImportHistory).order_by(ImportHistory.id.desc())).all()
     if period:
@@ -2006,7 +2030,7 @@ def list_import_history(
 
 
 @app.get("/imports/history/{history_id}", response_model=ImportHistoryOut)
-def get_import_history(history_id: int, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.ops, Role.biz]))):
+def get_import_history(history_id: int, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech]))):
     row = db.get(ImportHistory, history_id)
     if not row:
         raise HTTPException(status_code=404, detail="导入历史不存在")
@@ -2019,7 +2043,7 @@ def get_import_history(history_id: int, db: Session = Depends(get_db), _: dict =
 
 
 @app.get("/imports/history/{history_id}/issues")
-def get_import_history_issues(history_id: int, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.ops, Role.biz]))):
+def get_import_history_issues(history_id: int, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech]))):
     history = db.get(ImportHistory, history_id)
     if not history:
         raise HTTPException(status_code=404, detail="导入历史不存在")
@@ -2051,7 +2075,7 @@ def get_import_history_issues(history_id: int, db: Session = Depends(get_db), _:
 def get_import_history_unmatched_variants(
     history_id: int,
     db: Session = Depends(get_db),
-    _: dict = Depends(require_role([Role.admin, Role.finance, Role.ops, Role.biz])),
+    _: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech])),
 ):
     history = db.get(ImportHistory, history_id)
     if not history:
@@ -2084,7 +2108,7 @@ def get_import_history_unmatched_variants(
 def rematch_import_history_variants(
     history_id: int,
     db: Session = Depends(get_db),
-    ctx: dict = Depends(require_role([Role.admin, Role.finance, Role.ops, Role.biz])),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech])),
 ):
     history = db.get(ImportHistory, history_id)
     if not history:
@@ -2138,7 +2162,7 @@ def rematch_import_history_variants(
 
 
 @app.get("/dashboard/finance")
-def finance_dashboard(db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz]))):
+def finance_dashboard(db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.ops_manager, Role.tech]))):
     total_receivable = db.scalar(select(func.coalesce(func.sum(Bill.amount), 0)))
     total_received = db.scalar(select(func.coalesce(func.sum(Receipt.amount), 0)))
     total_invoiced = db.scalar(select(func.coalesce(func.sum(Invoice.total_amount), 0)))
@@ -2408,7 +2432,7 @@ def _collect_exception_data(
 def dashboard_overview(
     range: str = Query(default="7d"),
     db: Session = Depends(get_db),
-    _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops])),
+    _: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.ops_manager, Role.tech])),
 ):
     days = _parse_dashboard_range(range)
     today = dt.date.today()
@@ -2605,7 +2629,7 @@ def exceptions_overview(
     status: str = Query(default="all"),
     type: str = Query(default="all"),
     db: Session = Depends(get_db),
-    _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops])),
+    _: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.ops_manager, Role.tech])),
 ):
     range_mapping = {"7d": 7, "30d": 30, "90d": 90}
     if range not in range_mapping:
@@ -2618,7 +2642,7 @@ def exceptions_overview(
 def update_exception_status(
     payload: ExceptionStatusPatchIn,
     db: Session = Depends(get_db),
-    ctx: dict = Depends(require_role([Role.admin, Role.finance, Role.ops, Role.biz])),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance_manager])),
 ):
     if payload.type not in {"share", "channel", "game", "import", "overdue"}:
         raise HTTPException(status_code=400, detail="type 参数非法")

@@ -19,9 +19,10 @@ export default function LoginPage() {
   const onFinish = async (values: { username: string; password: string }) => {
     setLoading(true);
     try {
-      const data = await apiRequest<{ access_token: string; token_type: string }>("/login", "POST", values);
+      const data = await apiRequest<{ access_token: string; token_type: string; role?: string }>("/login", "POST", values);
       localStorage.setItem("access_token", data.access_token);
       localStorage.setItem("x_user", values.username);
+      localStorage.setItem("x_role", data.role || "finance_manager");
       router.replace("/home");
     } catch (e) {
       message.error((e as Error).message);

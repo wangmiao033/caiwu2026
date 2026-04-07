@@ -6,7 +6,7 @@ async function forward(request: NextRequest, path: string[]) {
   const url = `${backendBase}/${path.join("/")}${request.nextUrl.search}`;
   const method = request.method;
   const headers = new Headers();
-  const role = request.headers.get("x-role") || "finance";
+  const role = request.headers.get("x-role") || "finance_manager";
   const user = request.headers.get("x-user") || "finance_user";
   const authorization = request.headers.get("authorization");
   headers.set("x-role", role);

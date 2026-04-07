@@ -23,6 +23,7 @@ import {
   Tooltip,
   Typography,
   Upload,
+  Result,
   message,
 } from "antd";
 import type { UploadFile } from "antd/es/upload/interface";
@@ -30,6 +31,7 @@ import type { RcFile } from "antd/es/upload";
 import { DeleteOutlined, PlusOutlined, UploadOutlined } from "@ant-design/icons";
 import * as XLSX from "xlsx";
 import { apiRequest, apiRequestDirect } from "@/lib/api";
+import { getCurrentRole } from "@/lib/rbac";
 
 type PreviewRow = {
   key: number;
@@ -114,6 +116,8 @@ type ExtractRow = {
 
 export default function ImportPage() {
   const router = useRouter();
+  const role = getCurrentRole();
+  const canAccess = role === "admin" || role === "finance_manager" || role === "tech";
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [selectedFileName, setSelectedFileName] = useState("");
@@ -732,6 +736,10 @@ export default function ImportPage() {
   const extractErr = extractRows.filter((x) => !!x.error).length;
   const extractOk = extractRows.length - extractErr;
   const extractRowsShown = onlyShowExtractErrors ? extractRows.filter((x) => !!x.error) : extractRows;
+
+  if (!canAccess) {
+    return <Result status="403" title="403" subTitle="当前角色无权限访问导入页面" />;
+  }
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>

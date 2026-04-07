@@ -5,6 +5,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Alert, Button, Card, Col, Modal, Result, Row, Segmented, Select, Skeleton, Space, Statistic, Table, Tag, Typography, message } from "antd";
 import dayjs from "dayjs";
 import { ExceptionOverviewResponse, ExceptionRange, ExceptionStatus, ExceptionType, getExceptionsOverview, updateExceptionStatus } from "@/lib/api/exceptions";
+import { getCurrentRole } from "@/lib/rbac";
 
 type ExceptionStatusText = "待处理" | "已忽略" | "已解决";
 type DayRange = 7 | 30 | 90;
@@ -71,6 +72,8 @@ const statusFilterToQuery = (value: StatusFilter): "all" | ExceptionStatus => {
 
 export default function ExceptionsPage() {
   const router = useRouter();
+  const role = getCurrentRole();
+  const canUpdateExceptionStatus = role === "admin" || role === "finance_manager";
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const [typeFilter, setTypeFilter] = useState<TypeFilter>(() => parseTypeFilter(searchParams.get("type")));
@@ -223,12 +226,16 @@ export default function ExceptionsPage() {
         <Button type="link" onClick={() => goHandle(type)}>
           去处理
         </Button>
-        <Button type="link" onClick={() => handleStatusUpdate(row, "已解决")}>
-          标记已解决
-        </Button>
-        <Button type="link" onClick={() => handleStatusUpdate(row, "已忽略")}>
-          忽略
-        </Button>
+        {canUpdateExceptionStatus ? (
+          <>
+            <Button type="link" onClick={() => handleStatusUpdate(row, "已解决")}>
+              标记已解决
+            </Button>
+            <Button type="link" onClick={() => handleStatusUpdate(row, "已忽略")}>
+              忽略
+            </Button>
+          </>
+        ) : null}
       </Space>
     ),
   });

@@ -21,7 +21,7 @@ export async function POST(request: NextRequest) {
   const formData = new FormData();
   formData.append("file", new Blob([csv], { type: "text/csv" }), "extract_import.csv");
 
-  const role = request.headers.get("x-role") || "finance";
+  const role = request.headers.get("x-role") || "finance_manager";
   const user = request.headers.get("x-user") || "finance_user";
   const authorization = request.headers.get("authorization");
   const resp = await fetch(`${backendBase}/recon/import?period=${encodeURIComponent(period)}&import_type=extract`, {

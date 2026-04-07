@@ -2,8 +2,9 @@
 
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { Button, Card, Form, Input, InputNumber, Modal, Select, Space, Spin, Switch, Table, Tag, message } from "antd";
+import { Button, Card, Form, Input, InputNumber, Modal, Result, Select, Space, Spin, Switch, Table, Tag, message } from "antd";
 import { apiRequest } from "@/lib/api";
+import { getCurrentRole } from "@/lib/rbac";
 
 type Project = { id: number; name: string; status: string };
 type GameVariant = {
@@ -59,6 +60,8 @@ const defaultFormValues = {
 };
 
 function GameVariantsPageContent() {
+  const role = getCurrentRole();
+  const canAccess = role === "admin" || role === "finance_manager" || role === "tech";
   const searchParams = useSearchParams();
   const [projects, setProjects] = useState<Project[]>([]);
   const [rows, setRows] = useState<GameVariant[]>([]);
@@ -67,6 +70,10 @@ function GameVariantsPageContent() {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<GameVariant | null>(null);
   const [form] = Form.useForm();
+
+  if (!canAccess) {
+    return <Result status="403" title="403" subTitle="当前角色无权限访问版本管理页面" />;
+  }
 
   const projectNameById = useMemo(() => {
     const m = new Map<number, string>();

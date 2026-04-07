@@ -6,6 +6,7 @@ import { Alert, Button, Card, Col, Result, Row, Segmented, Skeleton, Space, Stat
 import { Line } from "@ant-design/charts";
 import dayjs from "dayjs";
 import { DashboardOverview, DashboardRange, getDashboardOverview } from "@/lib/api/dashboard";
+import { getCurrentRole } from "@/lib/rbac";
 
 type KpiItem = {
   key: string;
@@ -43,6 +44,9 @@ const formatMom = (mom: number) => {
 
 export default function HomePage() {
   const router = useRouter();
+  const role = getCurrentRole();
+  const canSeeRuleActions = role === "admin" || role === "finance_manager";
+  const canSeeImportActions = role !== "ops_manager";
   const [range, setRange] = useState<7 | 30>(7);
   const [loading, setLoading] = useState(true);
   const [errorText, setErrorText] = useState("");
@@ -97,9 +101,8 @@ export default function HomePage() {
   );
 
   const quickActions = [
-    { key: "newImport", text: "新建导入", to: "/import" },
-    { key: "importHistory", text: "查看导入历史", to: "/import?tab=history" },
-    { key: "rules", text: "配置分成规则", to: "/billing-rules" },
+    ...(canSeeImportActions ? [{ key: "newImport", text: "新建导入", to: "/import" }, { key: "importHistory", text: "查看导入历史", to: "/import?tab=history" }] : []),
+    ...(canSeeRuleActions ? [{ key: "rules", text: "配置分成规则", to: "/billing-rules" }] : []),
     { key: "mapping", text: "渠道映射", to: "/channel-game-map" },
     { key: "billing", text: "账单列表", to: "/billing" },
   ];

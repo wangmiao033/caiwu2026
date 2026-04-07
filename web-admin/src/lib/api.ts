@@ -4,7 +4,7 @@ type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 function getAuthHeaders(isFormData: boolean): Record<string, string> {
   const token = typeof window !== "undefined" ? localStorage.getItem("access_token") || "" : "";
-  const role = typeof window !== "undefined" ? localStorage.getItem("x_role") || "finance" : "finance";
+  const role = typeof window !== "undefined" ? localStorage.getItem("x_role") || "finance_manager" : "finance_manager";
   const user = typeof window !== "undefined" ? localStorage.getItem("x_user") || "finance_user" : "finance_user";
   const headers: Record<string, string> = {
     "x-role": role,

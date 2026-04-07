@@ -22,6 +22,7 @@ import {
   ShopOutlined,
 } from "@ant-design/icons";
 import { Button, Layout, Menu, Space, Typography } from "antd";
+import { getCurrentRole } from "@/lib/rbac";
 
 const { Header, Sider, Content } = Layout;
 
@@ -46,7 +47,17 @@ const menuItems = [
 export default function AdminShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const current = useMemo(() => menuItems.find((m) => pathname.startsWith(m.key))?.key || "/home", [pathname]);
+  const role = getCurrentRole();
+  const visibleMenuItems = useMemo(
+    () =>
+      menuItems.filter((m) => {
+        if (role === "ops_manager" && m.key === "/import") return false;
+        if (role === "tech" && m.key === "/billing-rules") return false;
+        return true;
+      }),
+    [role]
+  );
+  const current = useMemo(() => visibleMenuItems.find((m) => pathname.startsWith(m.key))?.key || "/home", [pathname, visibleMenuItems]);
   const xUser = typeof window !== "undefined" ? localStorage.getItem("x_user") || "finance_user" : "finance_user";
 
   return (
@@ -58,7 +69,7 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
             公司对账后台
           </Space>
         </div>
-        <Menu mode="inline" selectedKeys={[current]} items={menuItems} onClick={(e) => router.push(e.key)} />
+        <Menu mode="inline" selectedKeys={[current]} items={visibleMenuItems} onClick={(e) => router.push(e.key)} />
       </Sider>
       <Layout>
         <Header
