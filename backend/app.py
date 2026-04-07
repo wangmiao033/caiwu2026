@@ -163,6 +163,18 @@ class ReconIssueMeta(Base):
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
 
 
+class ReconIssueTimeline(Base):
+    __tablename__ = "recon_issue_timeline"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    issue_id: Mapped[int] = mapped_column(ForeignKey("recon_issues.id"), index=True)
+    action: Mapped[str] = mapped_column(String(30), default="resolve")
+    from_status: Mapped[str] = mapped_column(String(30), default="未处理")
+    to_status: Mapped[str] = mapped_column(String(30), default="已处理")
+    remark: Mapped[str] = mapped_column(String(300), default="")
+    operator: Mapped[str] = mapped_column(String(50), default="system")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
+
+
 class ImportHistory(Base):
     __tablename__ = "import_history"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -692,18 +704,31 @@ def resolve_issue(
     issue_id: int,
     payload: ResolveIssueIn,
     db: Session = Depends(get_db),
-    _: dict = Depends(require_role([Role.admin, Role.finance, Role.ops])),
+    operator_ctx: dict = Depends(require_role([Role.admin, Role.finance, Role.ops])),
 ):
     issue = db.get(ReconIssue, issue_id)
     if not issue:
         raise HTTPException(status_code=404, detail="异常不存在")
+    from_status = "已处理" if issue.resolved else "未处理"
     issue.resolved = payload.status in {"已处理", "resolved", "true", "1"}
+    to_status = "已处理" if issue.resolved else "未处理"
     meta = db.scalar(select(ReconIssueMeta).where(ReconIssueMeta.issue_id == issue.id))
     if meta:
         meta.remark = payload.remark
         meta.updated_at = dt.datetime.now()
     else:
         db.add(ReconIssueMeta(issue_id=issue.id, remark=payload.remark, updated_at=dt.datetime.now()))
+    db.add(
+        ReconIssueTimeline(
+            issue_id=issue.id,
+            action="resolve",
+            from_status=from_status,
+            to_status=to_status,
+            remark=payload.remark,
+            operator=operator_ctx.get("user", "system"),
+            created_at=dt.datetime.now(),
+        )
+    )
     db.commit()
     return {"issue_id": issue.id, "resolved": issue.resolved, "status": "已处理" if issue.resolved else "未处理", "remark": payload.remark}
 
@@ -712,7 +737,7 @@ def resolve_issue(
 def bulk_resolve_issues(
     payload: BulkResolveIssuesIn,
     db: Session = Depends(get_db),
-    _: dict = Depends(require_role([Role.admin, Role.finance, Role.ops])),
+    operator_ctx: dict = Depends(require_role([Role.admin, Role.finance, Role.ops])),
 ):
     success_count = 0
     failed_ids = []
@@ -721,13 +746,26 @@ def bulk_resolve_issues(
         if not issue:
             failed_ids.append(issue_id)
             continue
+        from_status = "已处理" if issue.resolved else "未处理"
         issue.resolved = True
+        to_status = "已处理"
         meta = db.scalar(select(ReconIssueMeta).where(ReconIssueMeta.issue_id == issue.id))
         if meta:
             meta.remark = payload.remark
             meta.updated_at = dt.datetime.now()
         else:
             db.add(ReconIssueMeta(issue_id=issue.id, remark=payload.remark, updated_at=dt.datetime.now()))
+        db.add(
+            ReconIssueTimeline(
+                issue_id=issue.id,
+                action="bulk_resolve",
+                from_status=from_status,
+                to_status=to_status,
+                remark=payload.remark,
+                operator=operator_ctx.get("user", "system"),
+                created_at=dt.datetime.now(),
+            )
+        )
         success_count += 1
     db.commit()
     return {"success_count": success_count, "failed_count": len(failed_ids), "failed_ids": failed_ids}
@@ -745,6 +783,7 @@ def list_recon_issues(task_id: int = Query(...), db: Session = Depends(get_db), 
     result = []
     for x in rows:
         meta = db.scalar(select(ReconIssueMeta).where(ReconIssueMeta.issue_id == x.id))
+        latest_timeline = db.scalar(select(ReconIssueTimeline).where(ReconIssueTimeline.issue_id == x.id).order_by(ReconIssueTimeline.id.desc()).limit(1))
         result.append(
             {
                 "issue_id": x.id,
@@ -757,9 +796,36 @@ def list_recon_issues(task_id: int = Query(...), db: Session = Depends(get_db), 
                 "created_at": "",
                 "remark": meta.remark if meta else "",
                 "updated_at": str(meta.updated_at) if meta else "",
+                "latest_operator": latest_timeline.operator if latest_timeline else "",
+                "latest_updated_at": str(latest_timeline.created_at) if latest_timeline else "",
             }
         )
     return result
+
+
+@app.get("/recon/issues/{issue_id}/timeline")
+def get_issue_timeline(
+    issue_id: int,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance, Role.ops, Role.biz])),
+):
+    issue = db.get(ReconIssue, issue_id)
+    if not issue:
+        raise HTTPException(status_code=404, detail="异常不存在")
+    rows = db.scalars(select(ReconIssueTimeline).where(ReconIssueTimeline.issue_id == issue_id).order_by(ReconIssueTimeline.id.asc())).all()
+    return [
+        {
+            "id": x.id,
+            "issue_id": x.issue_id,
+            "action": x.action,
+            "from_status": x.from_status,
+            "to_status": x.to_status,
+            "remark": x.remark,
+            "operator": x.operator,
+            "created_at": str(x.created_at),
+        }
+        for x in rows
+    ]
 
 
 @app.post("/billing/rules")
@@ -1227,6 +1293,7 @@ def get_import_history_issues(history_id: int, db: Session = Depends(get_db), _:
     result = []
     for x in rows:
         meta = db.scalar(select(ReconIssueMeta).where(ReconIssueMeta.issue_id == x.id))
+        latest_timeline = db.scalar(select(ReconIssueTimeline).where(ReconIssueTimeline.issue_id == x.id).order_by(ReconIssueTimeline.id.desc()).limit(1))
         result.append(
             {
                 "issue_id": x.id,
@@ -1239,6 +1306,8 @@ def get_import_history_issues(history_id: int, db: Session = Depends(get_db), _:
                 "created_at": "",
                 "remark": meta.remark if meta else "",
                 "updated_at": str(meta.updated_at) if meta else "",
+                "latest_operator": latest_timeline.operator if latest_timeline else "",
+                "latest_updated_at": str(latest_timeline.created_at) if latest_timeline else "",
             }
         )
     return result

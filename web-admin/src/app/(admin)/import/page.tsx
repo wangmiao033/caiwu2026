@@ -18,6 +18,7 @@ import {
   Table,
   Tabs,
   Tag,
+  Timeline,
   Tooltip,
   Upload,
   message,
@@ -110,13 +111,30 @@ export default function ImportPage() {
   const [historyPage, setHistoryPage] = useState(1);
   const [historyDetail, setHistoryDetail] = useState<ImportHistoryRow | null>(null);
   const [historyIssues, setHistoryIssues] = useState<
-    Array<{ issue_id: number; issue_type: string; message: string; status: string; row_no?: number; raw_data?: unknown; remark?: string; updated_at?: string }>
+    Array<{
+      issue_id: number;
+      issue_type: string;
+      message: string;
+      status: string;
+      row_no?: number;
+      raw_data?: unknown;
+      remark?: string;
+      updated_at?: string;
+      latest_operator?: string;
+      latest_updated_at?: string;
+    }>
   >([]);
   const [issueStatusFilter, setIssueStatusFilter] = useState("");
   const [selectedIssueIds, setSelectedIssueIds] = useState<number[]>([]);
   const [resolveOpen, setResolveOpen] = useState(false);
   const [resolveRemark, setResolveRemark] = useState("");
   const [resolveTargetIds, setResolveTargetIds] = useState<number[]>([]);
+  const [timelineOpen, setTimelineOpen] = useState(false);
+  const [timelineLoading, setTimelineLoading] = useState(false);
+  const [timelineIssueId, setTimelineIssueId] = useState<number | null>(null);
+  const [timelineRows, setTimelineRows] = useState<
+    Array<{ id: number; issue_id: number; action: string; from_status: string; to_status: string; remark: string; operator: string; created_at: string }>
+  >([]);
   const [loading, setLoading] = useState(false);
 
   const [extractFile, setExtractFile] = useState<File | null>(null);
@@ -203,12 +221,41 @@ export default function ImportPage() {
   };
   const loadHistoryIssues = async (historyId: number) => {
     try {
-      const data = await apiRequest<Array<{ issue_id: number; issue_type: string; message: string; status: string; row_no?: number; raw_data?: unknown; remark?: string; updated_at?: string }>>(
+      const data = await apiRequest<
+        Array<{
+          issue_id: number;
+          issue_type: string;
+          message: string;
+          status: string;
+          row_no?: number;
+          raw_data?: unknown;
+          remark?: string;
+          updated_at?: string;
+          latest_operator?: string;
+          latest_updated_at?: string;
+        }>
+      >(
         `/imports/history/${historyId}/issues`
       );
       setHistoryIssues(data);
     } catch (e) {
       message.error((e as Error).message);
+    }
+  };
+  const openTimeline = async (issueId: number) => {
+    setTimelineIssueId(issueId);
+    setTimelineOpen(true);
+    setTimelineLoading(true);
+    try {
+      const data = await apiRequest<
+        Array<{ id: number; issue_id: number; action: string; from_status: string; to_status: string; remark: string; operator: string; created_at: string }>
+      >(`/recon/issues/${issueId}/timeline`);
+      setTimelineRows(data || []);
+    } catch (e) {
+      message.error((e as Error).message);
+      setTimelineRows([]);
+    } finally {
+      setTimelineLoading(false);
     }
   };
   const loadHistoryDetail = async (historyId: number) => {
@@ -885,15 +932,24 @@ export default function ImportPage() {
                     },
                     { title: "处理备注", dataIndex: "remark", render: (v: string) => v || "-" },
                     { title: "更新时间", dataIndex: "updated_at", render: (v: string) => v || "-" },
+                    { title: "最新处理人", dataIndex: "latest_operator", width: 120, render: (v: string) => v || "-" },
+                    { title: "最新处理时间", dataIndex: "latest_updated_at", width: 180, render: (v: string) => v || "-" },
                     {
                       title: "操作",
                       render: (_, r) =>
-                        r.status === "未处理" ? (
-                          <Button size="small" onClick={() => openResolveModal([r.issue_id])}>
-                            标记已处理
-                          </Button>
-                        ) : (
-                          <Tag color="green">已处理</Tag>
+                        (
+                          <Space>
+                            {r.status === "未处理" ? (
+                              <Button size="small" onClick={() => openResolveModal([r.issue_id])}>
+                                标记已处理
+                              </Button>
+                            ) : (
+                              <Tag color="green">已处理</Tag>
+                            )}
+                            <Button size="small" onClick={() => openTimeline(r.issue_id)}>
+                              查看轨迹
+                            </Button>
+                          </Space>
                         ),
                     },
                   ]}
@@ -912,6 +968,30 @@ export default function ImportPage() {
           onChange={(e) => setResolveRemark(e.target.value)}
         />
       </Modal>
+      <Drawer open={timelineOpen} title={`异常处理轨迹 #${timelineIssueId || ""}`} width={560} onClose={() => setTimelineOpen(false)}>
+        <Spin spinning={timelineLoading}>
+          {timelineRows.length === 0 ? (
+            <Empty description="暂无处理轨迹" />
+          ) : (
+            <Timeline
+              items={timelineRows.map((x) => ({
+                children: (
+                  <Space direction="vertical" size={2}>
+                    <div>
+                      <b>{x.operator || "system"}</b> · {x.created_at || "-"}
+                    </div>
+                    <div>动作：{x.action}</div>
+                    <div>
+                      状态：{x.from_status || "-"} -&gt; {x.to_status || "-"}
+                    </div>
+                    <div>备注：{x.remark || "-"}</div>
+                  </Space>
+                ),
+              }))}
+            />
+          )}
+        </Spin>
+      </Drawer>
     </Space>
   );
 }
