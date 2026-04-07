@@ -2885,7 +2885,7 @@ def _collect_exception_data(
         raise HTTPException(status_code=400, detail="status 参数非法")
 
     cutoff_dt = dt.datetime.combine(dt.date.today() - dt.timedelta(days=days - 1), dt.time.min)
-    channels = {x.name for x in db.scalars(select(Channel.name)).all()}
+    channels = set(db.scalars(select(Channel.name)).all())
     active_variants = {x.raw_game_name for x in db.scalars(select(GameVariant.raw_game_name).where(GameVariant.status == VariantStatus.active)).all()}
 
     status_rows = db.scalars(select(ExceptionHandleRecord)).all()
