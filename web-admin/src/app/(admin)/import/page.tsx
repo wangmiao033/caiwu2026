@@ -24,6 +24,7 @@ import {
   message,
 } from "antd";
 import type { UploadFile } from "antd/es/upload/interface";
+import type { RcFile } from "antd/es/upload";
 import { DeleteOutlined, PlusOutlined, UploadOutlined } from "@ant-design/icons";
 import * as XLSX from "xlsx";
 import { apiRequest, apiRequestDirect } from "@/lib/api";
@@ -98,6 +99,8 @@ type ExtractRow = {
 export default function ImportPage() {
   const router = useRouter();
   const [fileList, setFileList] = useState<UploadFile[]>([]);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedFileName, setSelectedFileName] = useState("");
   const [period, setPeriod] = useState("2026-03");
   const [preview, setPreview] = useState<PreviewRow[]>([]);
   const [result, setResult] = useState<Record<string, unknown> | null>(null);
@@ -136,6 +139,7 @@ export default function ImportPage() {
     Array<{ id: number; issue_id: number; action: string; from_status: string; to_status: string; remark: string; operator: string; created_at: string }>
   >([]);
   const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
 
   const [extractFile, setExtractFile] = useState<File | null>(null);
   const [extractSheets, setExtractSheets] = useState<string[]>([]);
@@ -200,6 +204,46 @@ export default function ImportPage() {
       } as PreviewRow;
     });
     setPreview(data);
+  };
+
+  const isSupportedTemplateFile = (file: File) => {
+    const name = (file.name || "").toLowerCase();
+    return name.endsWith(".csv") || name.endsWith(".xlsx");
+  };
+
+  const clearTemplateFileState = () => {
+    setSelectedFile(null);
+    setSelectedFileName("");
+    setFileList([]);
+    setPreview([]);
+  };
+
+  const handleTemplateFileSelect = async (file: RcFile) => {
+    if (!isSupportedTemplateFile(file)) {
+      message.error("仅支持 CSV / XLSX 文件");
+      clearTemplateFileState();
+      return false;
+    }
+    setSelectedFile(file);
+    setSelectedFileName(file.name);
+    console.debug("[import/template] selectedFile set", { name: file.name, size: file.size });
+    setFileList([
+      {
+        uid: file.uid,
+        name: file.name,
+        status: "done",
+        size: file.size,
+        type: file.type,
+        originFileObj: file,
+      },
+    ]);
+    try {
+      await parseFile(file);
+    } catch {
+      setPreview([]);
+      message.error("文件解析失败，请检查模板格式");
+    }
+    return false;
   };
 
   const loadHistory = async (page = historyPage) => {
@@ -303,23 +347,29 @@ export default function ImportPage() {
   };
 
   const upload = async () => {
-    if (!fileList[0]?.originFileObj) {
+    if (!selectedFile) {
       message.warning("请先选择文件");
       return;
     }
+    console.debug("[import/template] upload clicked", { selectedFileName: selectedFile.name, size: selectedFile.size });
     Modal.confirm({
       title: "确认导入",
-      content: `确认将文件导入账期 ${period} 吗？`,
+      content: `确认将文件 ${selectedFileName || selectedFile.name} 导入账期 ${period} 吗？`,
       onOk: async () => {
+        const hide = message.loading("正在上传并导入...", 0);
         const formData = new FormData();
-        formData.append("file", fileList[0].originFileObj as File);
+        formData.append("file", selectedFile);
         try {
+          setUploading(true);
           const data = await apiRequest<Record<string, unknown>>(`/recon/import?period=${encodeURIComponent(period)}&import_type=template`, "POST", formData, true);
           setResult(data);
           await loadHistory(1);
-          message.success("导入完成");
+          message.success("导入成功");
         } catch (e) {
           message.error((e as Error).message);
+        } finally {
+          setUploading(false);
+          hide();
         }
       },
     });
@@ -547,21 +597,17 @@ export default function ImportPage() {
                   <Space wrap>
                     <Tag color="blue">支持 CSV / XLSX 模板导入</Tag>
                     <Upload
+                      maxCount={1}
                       accept=".csv,.xlsx"
-                      beforeUpload={(file) => {
-                        setFileList([file]);
-                        parseFile(file);
-                        return false;
-                      }}
+                      beforeUpload={handleTemplateFileSelect}
                       fileList={fileList}
                       onRemove={() => {
-                        setFileList([]);
-                        setPreview([]);
+                        clearTemplateFileState();
                       }}
                     >
                       <Button icon={<UploadOutlined />}>选择文件</Button>
                     </Upload>
-                    <Button type="primary" onClick={upload}>
+                    <Button type="primary" onClick={upload} loading={uploading}>
                       上传并导入
                     </Button>
                     <Button onClick={downloadTemplateCsv}>下载 CSV 模板</Button>
