@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Button, Card, Descriptions, Drawer, Input, Modal, Select, Space, Switch, Table, Tag, message } from "antd";
 import { apiRequest } from "@/lib/api";
 import { BillingRule, calcTrialResult, matchRuleForBill } from "@/lib/billingTrial";
+import { exportRowsToXlsx } from "@/lib/export";
 
 type BillRow = {
   id: number;
@@ -106,6 +107,28 @@ export default function BillingPage() {
     const rule = matchRuleForBill(rules, detail.bill_type, detail.target_name);
     return calcTrialResult(baseGross, rule);
   }, [detail, rules]);
+  const exportBills = () => {
+    const data = rowsWithTrial.map((x) => ({
+      账单ID: x.id,
+      账单类型: x.bill_type,
+      目标对象: x.target_name,
+      账期: x.period,
+      状态: x.status,
+      流水: x.gross_amount ?? x.amount,
+      规则状态: x.trial?.matched ? "已匹配规则" : "未配置规则",
+      折扣后流水: x.trial?.discountedGross ?? "",
+      通道费金额: x.trial?.channelFeeAmount ?? "",
+      税额: x.trial?.taxAmount ?? "",
+      研发分成金额: x.trial?.rdShareAmount ?? "",
+      私点金额: x.trial?.privateAmount ?? "",
+      试算结算金额: x.trial?.settlementAmount ?? "",
+      试算利润: x.trial?.profit ?? "",
+      发送状态: x.status,
+      创建时间: "",
+      说明: "试算结果仅供前端预览核对，正式结算以后端结果为准",
+    }));
+    exportRowsToXlsx(data, "billing_export.xlsx");
+  };
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
@@ -134,6 +157,7 @@ export default function BillingPage() {
               onChange={(v) => setFilterType(v || "")}
             />
             <Button onClick={loadBills}>查询</Button>
+            <Button onClick={exportBills}>导出账单</Button>
             <Space>
               <span>显示试算结果</span>
               <Switch checked={showTrial} onChange={setShowTrial} />

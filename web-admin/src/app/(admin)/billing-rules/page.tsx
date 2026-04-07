@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Button, Card, Form, InputNumber, Modal, Select, Space, Switch, Table, Tag, message } from "antd";
+import { Button, Card, Form, Input, InputNumber, Modal, Select, Space, Statistic, Switch, Table, Tag, Upload, message } from "antd";
 import { apiRequest } from "@/lib/api";
+import { exportRowsToXlsx } from "@/lib/export";
+import * as XLSX from "xlsx";
 
 type SimpleItem = { id: number; name: string };
 type MapRow = { id: number; channel: string; game: string; revenue_share_ratio: number; rd_settlement_ratio: number };
@@ -19,6 +21,7 @@ type RuleRow = {
   chaofanChannel: number;
   chaofanRd: number;
   enabled: boolean;
+  remark?: string;
 };
 
 const defaultRule = (): Omit<RuleRow, "key" | "channel" | "game"> => ({
@@ -31,6 +34,7 @@ const defaultRule = (): Omit<RuleRow, "key" | "channel" | "game"> => ({
   chaofanChannel: 0,
   chaofanRd: 0,
   enabled: true,
+  remark: "",
 });
 
 export default function BillingRulesPage() {
@@ -42,6 +46,8 @@ export default function BillingRulesPage() {
   const [qGame, setQGame] = useState<string>("");
   const [open, setOpen] = useState(false);
   const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importRows, setImportRows] = useState<RuleRow[]>([]);
   const [form] = Form.useForm();
 
   useEffect(() => {
@@ -112,6 +118,98 @@ export default function BillingRulesPage() {
     setOpen(false);
   };
 
+  const downloadTemplate = () => {
+    exportRowsToXlsx(
+      [
+        {
+          游戏: "游戏A",
+          渠道: "渠道A",
+          折扣类型: "无",
+          通道费: 0,
+          税点: 0,
+          研发分成: 0.5,
+          私点: 0,
+          IP授权: 0,
+          超凡与渠道: 0,
+          超凡与研发: 0,
+          状态: "启用",
+          备注: "",
+        },
+      ],
+      "billing_rules_template.xlsx"
+    );
+  };
+
+  const parseImport = async (file: File) => {
+    const wb = XLSX.read(await file.arrayBuffer());
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws);
+    const parsed = rows.map((r, idx) => {
+      const channel = String(r["渠道"] || "").trim();
+      const game = String(r["游戏"] || "").trim();
+      const discountType = (String(r["折扣类型"] || "无").trim() || "无") as RuleRow["discountType"];
+      const enabled = String(r["状态"] || "启用").includes("启");
+      const row: RuleRow = {
+        key: `${channel}-${game}-${idx}`,
+        channel,
+        game,
+        discountType,
+        channelFee: Number(r["通道费"] || 0),
+        taxRate: Number(r["税点"] || 0),
+        rdShare: Number(r["研发分成"] || 0.5),
+        privateRate: Number(r["私点"] || 0),
+        ipLicense: Number(r["IP授权"] || 0),
+        chaofanChannel: Number(r["超凡与渠道"] || 0),
+        chaofanRd: Number(r["超凡与研发"] || 0),
+        enabled,
+        remark: String(r["备注"] || ""),
+      };
+      return row;
+    });
+    setImportRows(parsed);
+    setImportOpen(true);
+  };
+
+  const importErrCount = importRows.filter((x) => !x.channel || !x.game || Number.isNaN(x.rdShare)).length;
+  const importOkCount = importRows.length - importErrCount;
+  const confirmImport = async () => {
+    const valid = importRows.filter((x) => x.channel && x.game && !Number.isNaN(x.rdShare));
+    try {
+      const summary = await apiRequest<{ created_count: number; updated_count: number; failed_count: number }>(
+        "/billing/rules/bulk-import",
+        "POST",
+        {
+          rows: valid.map((x) => ({
+            game: x.game,
+            channel: x.channel,
+            discount_type: x.discountType,
+            channel_fee: x.channelFee,
+            tax_rate: x.taxRate,
+            rd_share: x.rdShare,
+            private_rate: x.privateRate,
+            ip_license: x.ipLicense,
+            chaofan_channel: x.chaofanChannel,
+            chaofan_rd: x.chaofanRd,
+            status: x.enabled ? "启用" : "停用",
+            remark: x.remark || "",
+          })),
+        }
+      );
+      saveLocal([...valid, ...rules.filter((x) => !valid.some((v) => `${v.channel}-${v.game}` === `${x.channel}-${x.game}`))]);
+      message.success(`导入完成: 新增${summary.created_count} 更新${summary.updated_count} 失败${summary.failed_count}`);
+      setImportOpen(false);
+    } catch (e) {
+      message.error((e as Error).message);
+    }
+  };
+
+  const exportCurrent = () => {
+    exportRowsToXlsx(filtered as unknown as Record<string, unknown>[], "billing_rules_filtered.xlsx");
+  };
+  const exportAll = () => {
+    exportRowsToXlsx(rules as unknown as Record<string, unknown>[], "billing_rules_all.xlsx");
+  };
+
   return (
     <Card
       title="规则配置（游戏 + 渠道）"
@@ -136,6 +234,12 @@ export default function BillingRulesPage() {
           <Button type="primary" onClick={onAdd}>
             新增规则
           </Button>
+          <Button onClick={downloadTemplate}>模板下载</Button>
+          <Upload beforeUpload={(file) => { parseImport(file); return false; }} showUploadList={false}>
+            <Button>导入规则</Button>
+          </Upload>
+          <Button onClick={exportCurrent}>导出当前筛选</Button>
+          <Button onClick={exportAll}>导出全部</Button>
         </Space>
       }
     >
@@ -179,8 +283,46 @@ export default function BillingRulesPage() {
           <Form.Item label="超凡与渠道（预留）" name="chaofanChannel"><InputNumber min={0} step={0.01} style={{ width: "100%" }} /></Form.Item>
           <Form.Item label="超凡与研发（预留）" name="chaofanRd"><InputNumber min={0} step={0.01} style={{ width: "100%" }} /></Form.Item>
           <Form.Item label="启用状态" name="enabled" valuePropName="checked"><Switch /></Form.Item>
+          <Form.Item label="备注" name="remark"><Input /></Form.Item>
         </Form>
       </Modal>
+      <Modal
+        open={importOpen}
+        width={980}
+        title="规则导入预览"
+        onCancel={() => setImportOpen(false)}
+        onOk={confirmImport}
+        okText="确认导入"
+      >
+        <Space size={24} style={{ marginBottom: 12 }}>
+          <Statistic title="总行数" value={importRows.length} />
+          <Statistic title="正常行数" value={importOkCount} />
+          <Statistic title="异常行数" value={importErrCount} valueStyle={{ color: importErrCount ? "#cf1322" : undefined }} />
+        </Space>
+        <Table
+          rowKey="key"
+          dataSource={importRows}
+          pagination={{ pageSize: 8 }}
+          rowClassName={(r) => (!r.channel || !r.game || Number.isNaN(r.rdShare) ? "row-error" : "")}
+          columns={[
+            { title: "渠道", dataIndex: "channel" },
+            { title: "游戏", dataIndex: "game" },
+            { title: "折扣类型", dataIndex: "discountType" },
+            { title: "通道费", dataIndex: "channelFee" },
+            { title: "税点", dataIndex: "taxRate" },
+            { title: "研发分成", dataIndex: "rdShare" },
+            {
+              title: "异常原因",
+              render: (_, r) => (!r.channel || !r.game ? "渠道或游戏为空" : Number.isNaN(r.rdShare) ? "研发分成非法" : "-"),
+            },
+          ]}
+        />
+      </Modal>
+      <style jsx global>{`
+        .row-error td {
+          background: #fff1f0 !important;
+        }
+      `}</style>
     </Card>
   );
 }

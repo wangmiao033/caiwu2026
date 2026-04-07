@@ -1,40 +1,73 @@
 "use client";
 
-import { useState } from "react";
-import { Button, Card, Form, Input, InputNumber, Space, Table, Tag, message } from "antd";
+import { useEffect, useMemo, useState } from "react";
+import { Button, Card, Form, Input, InputNumber, Select, Space, Table, Tag, message } from "antd";
 import { apiRequest } from "@/lib/api";
+import { exportRowsToXlsx } from "@/lib/export";
 
 type ReceiptRow = {
-  key: number;
+  id: number;
   bill_id: number;
   received_at: string;
   amount: number;
   bank_ref: string;
   account_name: string;
-  collection_status?: string;
+  status?: string;
+  target_name?: string;
+  period?: string;
+  remark?: string;
+  created_at?: string;
 };
 
 export default function ReceiptsPage() {
   const [form] = Form.useForm();
   const [rows, setRows] = useState<ReceiptRow[]>([]);
+  const [status, setStatus] = useState("");
+  const [period, setPeriod] = useState("");
+  const [keyword, setKeyword] = useState("");
+
+  const load = async () => {
+    try {
+      const params = new URLSearchParams();
+      if (status) params.set("status", status);
+      if (period) params.set("period", period);
+      if (keyword) params.set("keyword", keyword);
+      const data = await apiRequest<ReceiptRow[]>(`/receipts${params.toString() ? `?${params.toString()}` : ""}`);
+      setRows(data);
+    } catch (e) {
+      message.error((e as Error).message);
+    }
+  };
+  useEffect(() => {
+    load();
+  }, []);
 
   const submit = async () => {
     const values = await form.validateFields();
     try {
       const result = await apiRequest<{ collection_status: string; receipt_id: number }>("/receipts", "POST", values);
       message.success("回款登记成功");
-      setRows((prev) => [
-        {
-          key: result.receipt_id,
-          ...values,
-          collection_status: result.collection_status,
-        },
-        ...prev,
-      ]);
       form.resetFields();
+      await load();
     } catch (e) {
       message.error((e as Error).message);
     }
+  };
+  const filtered = useMemo(() => rows, [rows]);
+  const exportData = () => {
+    exportRowsToXlsx(
+      filtered.map((x) => ({
+        回款ID: x.id,
+        关联账单: x.bill_id,
+        目标对象: x.target_name || "",
+        金额: x.amount,
+        回款日期: x.received_at,
+        状态: x.status || "",
+        备注: x.remark || "",
+        创建时间: x.created_at || "",
+      })),
+      "receipts_export.xlsx"
+    );
   };
 
   return (
@@ -49,20 +82,45 @@ export default function ReceiptsPage() {
           <Form.Item><Button type="primary" onClick={submit}>提交</Button></Form.Item>
         </Form>
       </Card>
-      <Card title="已登记回款（本次会话）">
+      <Card
+        title="回款列表"
+        extra={
+          <Space>
+            <Select
+              allowClear
+              placeholder="状态筛选"
+              style={{ width: 160 }}
+              options={[
+                { label: "待回款", value: "待回款" },
+                { label: "部分回款", value: "部分回款" },
+                { label: "已回款", value: "已回款" },
+              ]}
+              value={status || undefined}
+              onChange={(v) => setStatus(v || "")}
+            />
+            <Input placeholder="账期筛选" value={period} onChange={(e) => setPeriod(e.target.value)} />
+            <Input placeholder="关键字" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
+            <Button onClick={load}>查询</Button>
+            <Button onClick={exportData}>导出</Button>
+          </Space>
+        }
+      >
         <Table
-          rowKey="key"
-          dataSource={rows}
+          rowKey="id"
+          dataSource={filtered}
           pagination={{ pageSize: 10 }}
           columns={[
+            { title: "回款ID", dataIndex: "id" },
             { title: "账单ID", dataIndex: "bill_id" },
+            { title: "目标对象", dataIndex: "target_name" },
+            { title: "账期", dataIndex: "period" },
             { title: "回款日期", dataIndex: "received_at" },
             { title: "金额", dataIndex: "amount" },
             { title: "流水号", dataIndex: "bank_ref" },
             { title: "收款账户", dataIndex: "account_name" },
             {
               title: "核销状态",
-              dataIndex: "collection_status",
+              dataIndex: "status",
               render: (v: string) => <Tag color={v === "已回款" ? "green" : v === "部分回款" ? "gold" : "blue"}>{v || "-"}</Tag>,
             },
           ]}

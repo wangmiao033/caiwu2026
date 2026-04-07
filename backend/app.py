@@ -239,6 +239,25 @@ class RuleIn(BaseModel):
     default_ratio: Decimal
 
 
+class RuleBulkRow(BaseModel):
+    game: str
+    channel: str
+    discount_type: str = "无"
+    channel_fee: Decimal = Decimal("0")
+    tax_rate: Decimal = Decimal("0")
+    rd_share: Decimal = Decimal("0.5")
+    private_rate: Decimal = Decimal("0")
+    ip_license: Decimal = Decimal("0")
+    chaofan_channel: Decimal = Decimal("0")
+    chaofan_rd: Decimal = Decimal("0")
+    status: str = "启用"
+    remark: str = ""
+
+
+class RuleBulkIn(BaseModel):
+    rows: list[RuleBulkRow]
+
+
 class LoginIn(BaseModel):
     username: str
     password: str
@@ -595,8 +614,18 @@ def create_rule(payload: RuleIn, db: Session = Depends(get_db), _: dict = Depend
 
 
 @app.get("/billing/rules")
-def list_rules(db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz]))):
-    return db.scalars(select(BillingRule).order_by(BillingRule.id.desc())).all()
+def list_rules(
+    channel: Optional[str] = None,
+    game: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz])),
+):
+    rows = db.scalars(select(BillingRule).order_by(BillingRule.id.desc())).all()
+    if channel:
+        rows = [x for x in rows if channel in x.name]
+    if game:
+        rows = [x for x in rows if game in x.name]
+    return rows
 
 
 @app.put("/billing/rules/{rule_id}")
@@ -609,6 +638,50 @@ def update_rule(rule_id: int, payload: RuleIn, db: Session = Depends(get_db), _:
     row.default_ratio = payload.default_ratio
     db.commit()
     return {"id": row.id}
+
+
+@app.post("/billing/rules/bulk-import")
+def bulk_import_rules(payload: RuleBulkIn, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance]))):
+    created_count = 0
+    updated_count = 0
+    failed_count = 0
+    for row in payload.rows:
+        try:
+            name = f"{row.channel}-{row.game}-rule"
+            existing = db.scalar(select(BillingRule).where(BillingRule.name == name))
+            if existing:
+                existing.default_ratio = row.rd_share
+                existing.active = row.status in {"启用", "enabled", "true", "1"}
+                updated_count += 1
+            else:
+                db.add(
+                    BillingRule(
+                        name=name,
+                        bill_type=BillType.channel,
+                        default_ratio=row.rd_share,
+                        active=row.status in {"启用", "enabled", "true", "1"},
+                    )
+                )
+                created_count += 1
+        except Exception:
+            failed_count += 1
+    db.commit()
+    return {"created_count": created_count, "updated_count": updated_count, "failed_count": failed_count}
+
+
+@app.get("/billing/rules/export")
+def export_rules(db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz]))):
+    rows = db.scalars(select(BillingRule).order_by(BillingRule.id.desc())).all()
+    return [
+        {
+            "id": x.id,
+            "name": x.name,
+            "bill_type": x.bill_type,
+            "default_ratio": x.default_ratio,
+            "active": x.active,
+        }
+        for x in rows
+    ]
 
 
 @app.post("/billing/generate")
@@ -695,9 +768,37 @@ def create_invoice(payload: InvoiceIn, db: Session = Depends(get_db), _: dict = 
 
 
 @app.get("/invoices")
-def list_invoices(db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz]))):
+def list_invoices(
+    status: Optional[str] = None,
+    period: Optional[str] = None,
+    keyword: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz])),
+):
     rows = db.scalars(select(Invoice).order_by(Invoice.id.desc())).all()
-    return rows
+    result = []
+    for x in rows:
+        bill = db.get(Bill, x.bill_id)
+        item = {
+            "id": x.id,
+            "invoice_no": x.invoice_no,
+            "bill_id": x.bill_id,
+            "issue_date": x.issue_date,
+            "total_amount": x.total_amount,
+            "status": x.status,
+            "target_name": bill.target_name if bill else "",
+            "period": bill.period if bill else "",
+            "created_at": str(x.issue_date),
+            "remark": "",
+        }
+        result.append(item)
+    if status:
+        result = [x for x in result if str(x["status"]) == status]
+    if period:
+        result = [x for x in result if period in str(x["period"])]
+    if keyword:
+        result = [x for x in result if keyword in f'{x["invoice_no"]}{x["bill_id"]}{x["target_name"]}']
+    return result
 
 
 @app.put("/invoices/{invoice_id}")
@@ -735,8 +836,38 @@ def register_receipt(payload: ReceiptIn, db: Session = Depends(get_db), _: dict 
 
 
 @app.get("/receipts")
-def list_receipts(db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz]))):
-    return db.scalars(select(Receipt).order_by(Receipt.id.desc())).all()
+def list_receipts(
+    status: Optional[str] = None,
+    period: Optional[str] = None,
+    keyword: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz])),
+):
+    rows = db.scalars(select(Receipt).order_by(Receipt.id.desc())).all()
+    result = []
+    for x in rows:
+        bill = db.get(Bill, x.bill_id)
+        item = {
+            "id": x.id,
+            "bill_id": x.bill_id,
+            "received_at": x.received_at,
+            "amount": x.amount,
+            "bank_ref": x.bank_ref,
+            "account_name": x.account_name,
+            "target_name": bill.target_name if bill else "",
+            "period": bill.period if bill else "",
+            "status": bill.collection_status if bill else "",
+            "remark": "",
+            "created_at": str(x.received_at),
+        }
+        result.append(item)
+    if status:
+        result = [x for x in result if str(x["status"]) == status]
+    if period:
+        result = [x for x in result if period in str(x["period"])]
+    if keyword:
+        result = [x for x in result if keyword in f'{x["bill_id"]}{x["target_name"]}{x["bank_ref"]}']
+    return result
 
 
 @app.put("/receipts/{receipt_id}")
