@@ -155,6 +155,14 @@ class ReconIssue(Base):
     resolved: Mapped[bool] = mapped_column(default=False)
 
 
+class ReconIssueMeta(Base):
+    __tablename__ = "recon_issue_meta"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    issue_id: Mapped[int] = mapped_column(ForeignKey("recon_issues.id"), unique=True, index=True)
+    remark: Mapped[str] = mapped_column(String(300), default="")
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
+
+
 class ImportHistory(Base):
     __tablename__ = "import_history"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -292,6 +300,16 @@ class RuleBulkIn(BaseModel):
     rows: list[RuleBulkRow]
 
 
+class ResolveIssueIn(BaseModel):
+    status: str = "已处理"
+    remark: str = ""
+
+
+class BulkResolveIssuesIn(BaseModel):
+    issue_ids: list[int]
+    remark: str = ""
+
+
 class LoginIn(BaseModel):
     username: str
     password: str
@@ -352,6 +370,8 @@ class ImportHistoryOut(Out):
     summary: str
     created_by: str
     created_at: dt.datetime
+    unresolved_issue_count: int = 0
+    resolved_issue_count: int = 0
 
 
 def get_db():
@@ -668,13 +688,49 @@ def confirm_recon(task_id: int, db: Session = Depends(get_db), _: dict = Depends
 
 
 @app.post("/recon/issues/{issue_id}/resolve")
-def resolve_issue(issue_id: int, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.ops]))):
+def resolve_issue(
+    issue_id: int,
+    payload: ResolveIssueIn,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance, Role.ops])),
+):
     issue = db.get(ReconIssue, issue_id)
     if not issue:
         raise HTTPException(status_code=404, detail="异常不存在")
-    issue.resolved = True
+    issue.resolved = payload.status in {"已处理", "resolved", "true", "1"}
+    meta = db.scalar(select(ReconIssueMeta).where(ReconIssueMeta.issue_id == issue.id))
+    if meta:
+        meta.remark = payload.remark
+        meta.updated_at = dt.datetime.now()
+    else:
+        db.add(ReconIssueMeta(issue_id=issue.id, remark=payload.remark, updated_at=dt.datetime.now()))
     db.commit()
-    return {"issue_id": issue.id, "resolved": True}
+    return {"issue_id": issue.id, "resolved": issue.resolved, "status": "已处理" if issue.resolved else "未处理", "remark": payload.remark}
+
+
+@app.post("/recon/issues/bulk-resolve")
+def bulk_resolve_issues(
+    payload: BulkResolveIssuesIn,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance, Role.ops])),
+):
+    success_count = 0
+    failed_ids = []
+    for issue_id in payload.issue_ids:
+        issue = db.get(ReconIssue, issue_id)
+        if not issue:
+            failed_ids.append(issue_id)
+            continue
+        issue.resolved = True
+        meta = db.scalar(select(ReconIssueMeta).where(ReconIssueMeta.issue_id == issue.id))
+        if meta:
+            meta.remark = payload.remark
+            meta.updated_at = dt.datetime.now()
+        else:
+            db.add(ReconIssueMeta(issue_id=issue.id, remark=payload.remark, updated_at=dt.datetime.now()))
+        success_count += 1
+    db.commit()
+    return {"success_count": success_count, "failed_count": len(failed_ids), "failed_ids": failed_ids}
 
 
 @app.get("/recon/tasks")
@@ -686,19 +742,24 @@ def list_recon(db: Session = Depends(get_db), _: dict = Depends(require_role([Ro
 @app.get("/recon/issues")
 def list_recon_issues(task_id: int = Query(...), db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.ops]))):
     rows = db.scalars(select(ReconIssue).where(ReconIssue.recon_task_id == task_id).order_by(ReconIssue.id.desc())).all()
-    return [
-        {
-            "issue_id": x.id,
-            "task_id": x.recon_task_id,
-            "issue_type": x.issue_type,
-            "message": x.detail,
-            "status": "已处理" if x.resolved else "未处理",
-            "row_no": None,
-            "raw_data": None,
-            "created_at": "",
-        }
-        for x in rows
-    ]
+    result = []
+    for x in rows:
+        meta = db.scalar(select(ReconIssueMeta).where(ReconIssueMeta.issue_id == x.id))
+        result.append(
+            {
+                "issue_id": x.id,
+                "task_id": x.recon_task_id,
+                "issue_type": x.issue_type,
+                "message": x.detail,
+                "status": "已处理" if x.resolved else "未处理",
+                "row_no": None,
+                "raw_data": None,
+                "created_at": "",
+                "remark": meta.remark if meta else "",
+                "updated_at": str(meta.updated_at) if meta else "",
+            }
+        )
+    return result
 
 
 @app.post("/billing/rules")
@@ -1149,7 +1210,12 @@ def get_import_history(history_id: int, db: Session = Depends(get_db), _: dict =
     row = db.get(ImportHistory, history_id)
     if not row:
         raise HTTPException(status_code=404, detail="导入历史不存在")
-    return row
+    unresolved = db.scalar(select(func.count(ReconIssue.id)).where(ReconIssue.recon_task_id == row.task_id, ReconIssue.resolved.is_(False)))
+    resolved = db.scalar(select(func.count(ReconIssue.id)).where(ReconIssue.recon_task_id == row.task_id, ReconIssue.resolved.is_(True)))
+    payload = ImportHistoryOut.model_validate(row)
+    payload.unresolved_issue_count = int(unresolved or 0)
+    payload.resolved_issue_count = int(resolved or 0)
+    return payload
 
 
 @app.get("/imports/history/{history_id}/issues")
@@ -1158,19 +1224,24 @@ def get_import_history_issues(history_id: int, db: Session = Depends(get_db), _:
     if not history:
         raise HTTPException(status_code=404, detail="导入历史不存在")
     rows = db.scalars(select(ReconIssue).where(ReconIssue.recon_task_id == history.task_id).order_by(ReconIssue.id.desc())).all()
-    return [
-        {
-            "issue_id": x.id,
-            "task_id": x.recon_task_id,
-            "issue_type": x.issue_type,
-            "message": x.detail,
-            "status": "已处理" if x.resolved else "未处理",
-            "row_no": None,
-            "raw_data": None,
-            "created_at": "",
-        }
-        for x in rows
-    ]
+    result = []
+    for x in rows:
+        meta = db.scalar(select(ReconIssueMeta).where(ReconIssueMeta.issue_id == x.id))
+        result.append(
+            {
+                "issue_id": x.id,
+                "task_id": x.recon_task_id,
+                "issue_type": x.issue_type,
+                "message": x.detail,
+                "status": "已处理" if x.resolved else "未处理",
+                "row_no": None,
+                "raw_data": None,
+                "created_at": "",
+                "remark": meta.remark if meta else "",
+                "updated_at": str(meta.updated_at) if meta else "",
+            }
+        )
+    return result
 
 
 @app.get("/dashboard/finance")

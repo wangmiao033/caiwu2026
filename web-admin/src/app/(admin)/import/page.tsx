@@ -18,6 +18,7 @@ import {
   Table,
   Tabs,
   Tag,
+  Tooltip,
   Upload,
   message,
 } from "antd";
@@ -66,6 +67,8 @@ type ImportHistoryRow = {
   summary: string;
   created_at: string;
   created_by: string;
+  unresolved_issue_count?: number;
+  resolved_issue_count?: number;
 };
 
 type ImportHistoryListResp = {
@@ -106,8 +109,14 @@ export default function ImportPage() {
   const [historyFilter, setHistoryFilter] = useState<ImportHistoryFilter>({ fileName: "", period: "", import_type: "", status: "" });
   const [historyPage, setHistoryPage] = useState(1);
   const [historyDetail, setHistoryDetail] = useState<ImportHistoryRow | null>(null);
-  const [historyIssues, setHistoryIssues] = useState<Array<{ issue_id: number; issue_type: string; message: string; status: string; row_no?: number; raw_data?: unknown }>>([]);
+  const [historyIssues, setHistoryIssues] = useState<
+    Array<{ issue_id: number; issue_type: string; message: string; status: string; row_no?: number; raw_data?: unknown; remark?: string; updated_at?: string }>
+  >([]);
   const [issueStatusFilter, setIssueStatusFilter] = useState("");
+  const [selectedIssueIds, setSelectedIssueIds] = useState<number[]>([]);
+  const [resolveOpen, setResolveOpen] = useState(false);
+  const [resolveRemark, setResolveRemark] = useState("");
+  const [resolveTargetIds, setResolveTargetIds] = useState<number[]>([]);
   const [loading, setLoading] = useState(false);
 
   const [extractFile, setExtractFile] = useState<File | null>(null);
@@ -194,10 +203,53 @@ export default function ImportPage() {
   };
   const loadHistoryIssues = async (historyId: number) => {
     try {
-      const data = await apiRequest<Array<{ issue_id: number; issue_type: string; message: string; status: string; row_no?: number; raw_data?: unknown }>>(
+      const data = await apiRequest<Array<{ issue_id: number; issue_type: string; message: string; status: string; row_no?: number; raw_data?: unknown; remark?: string; updated_at?: string }>>(
         `/imports/history/${historyId}/issues`
       );
       setHistoryIssues(data);
+    } catch (e) {
+      message.error((e as Error).message);
+    }
+  };
+  const loadHistoryDetail = async (historyId: number) => {
+    try {
+      const detail = await apiRequest<ImportHistoryRow>(`/imports/history/${historyId}`);
+      setHistoryDetail(detail);
+    } catch (e) {
+      message.error((e as Error).message);
+    }
+  };
+  const openResolveModal = (ids: number[]) => {
+    if (!ids.length) {
+      message.warning("请先选择要处理的异常");
+      return;
+    }
+    setResolveTargetIds(ids);
+    setResolveRemark("");
+    setResolveOpen(true);
+  };
+  const submitResolve = async () => {
+    try {
+      if (resolveTargetIds.length === 1) {
+        await apiRequest(`/recon/issues/${resolveTargetIds[0]}/resolve`, "POST", { status: "已处理", remark: resolveRemark });
+        message.success("异常已标记处理");
+      } else {
+        const resp = await apiRequest<{ success_count: number; failed_count: number; failed_ids: number[] }>(
+          "/recon/issues/bulk-resolve",
+          "POST",
+          { issue_ids: resolveTargetIds, remark: resolveRemark }
+        );
+        if (resp.failed_count > 0) {
+          message.warning(`批量处理完成，成功${resp.success_count}，失败${resp.failed_count}`);
+        } else {
+          message.success(`批量处理成功 ${resp.success_count} 条`);
+        }
+      }
+      setResolveOpen(false);
+      setSelectedIssueIds([]);
+      if (historyDetail) {
+        await Promise.all([loadHistoryIssues(historyDetail.id), loadHistoryDetail(historyDetail.id), loadHistory(historyPage)]);
+      }
     } catch (e) {
       message.error((e as Error).message);
     }
@@ -547,7 +599,9 @@ export default function ImportPage() {
                               onClick={() => {
                                 setHistoryDetail(r);
                                 setIssueStatusFilter("");
+                                setSelectedIssueIds([]);
                                 loadHistoryIssues(r.id);
+                                loadHistoryDetail(r.id);
                               }}
                             >
                               详情
@@ -762,6 +816,8 @@ export default function ImportPage() {
                 { k: "总行数", v: historyDetail.total_count },
                 { k: "正常行数", v: historyDetail.valid_count },
                 { k: "异常行数", v: historyDetail.invalid_count },
+                { k: "已处理异常数", v: historyDetail.resolved_issue_count ?? 0 },
+                { k: "未处理异常数", v: historyDetail.unresolved_issue_count ?? 0 },
                 { k: "流水合计", v: historyDetail.amount_sum },
                 { k: "状态", v: historyDetail.status },
                 { k: "摘要", v: historyDetail.summary },
@@ -791,6 +847,9 @@ export default function ImportPage() {
                     onChange={(v) => setIssueStatusFilter(v || "")}
                   />
                   <Button onClick={() => router.push(`/recon-tasks?task_id=${historyDetail.task_id}`)}>去核对任务</Button>
+                  <Button type="primary" disabled={selectedIssueIds.length === 0} onClick={() => openResolveModal(selectedIssueIds)}>
+                    批量标记已处理
+                  </Button>
                 </Space>
               }
             >
@@ -801,20 +860,58 @@ export default function ImportPage() {
                   size="small"
                   rowKey="issue_id"
                   dataSource={historyIssues.filter((x) => !issueStatusFilter || x.status === issueStatusFilter)}
+                  rowSelection={{
+                    selectedRowKeys: selectedIssueIds,
+                    onChange: (keys) => setSelectedIssueIds(keys as number[]),
+                    getCheckboxProps: (record) => ({ disabled: record.status === "已处理" }),
+                  }}
                   pagination={{ pageSize: 6 }}
                   columns={[
                     { title: "异常类型", dataIndex: "issue_type", width: 120 },
                     { title: "异常描述", dataIndex: "message" },
                     { title: "状态", dataIndex: "status", width: 100, render: (v: string) => <Tag color={v === "已处理" ? "green" : "red"}>{v}</Tag> },
                     { title: "原始行号", dataIndex: "row_no", width: 100, render: (v: number) => v ?? "-" },
-                    { title: "原始数据", dataIndex: "raw_data", render: (v: unknown) => (v ? JSON.stringify(v) : "-") },
+                    {
+                      title: "原始数据",
+                      dataIndex: "raw_data",
+                      render: (v: unknown) =>
+                        v ? (
+                          <Tooltip title={<pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(v, null, 2)}</pre>}>
+                            <span>查看</span>
+                          </Tooltip>
+                        ) : (
+                          "-"
+                        ),
+                    },
+                    { title: "处理备注", dataIndex: "remark", render: (v: string) => v || "-" },
+                    { title: "更新时间", dataIndex: "updated_at", render: (v: string) => v || "-" },
+                    {
+                      title: "操作",
+                      render: (_, r) =>
+                        r.status === "未处理" ? (
+                          <Button size="small" onClick={() => openResolveModal([r.issue_id])}>
+                            标记已处理
+                          </Button>
+                        ) : (
+                          <Tag color="green">已处理</Tag>
+                        ),
+                    },
                   ]}
                 />
               )}
+              {(historyDetail.unresolved_issue_count ?? 0) === 0 && historyIssues.length > 0 && <Tag color="green">该次导入异常已全部处理</Tag>}
             </Card>
           </Space>
         )}
       </Drawer>
+      <Modal open={resolveOpen} title="标记异常已处理" onCancel={() => setResolveOpen(false)} onOk={submitResolve} okText="确认处理">
+        <Input.TextArea
+          rows={3}
+          placeholder="可选：填写处理备注"
+          value={resolveRemark}
+          onChange={(e) => setResolveRemark(e.target.value)}
+        />
+      </Modal>
     </Space>
   );
 }
