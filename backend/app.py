@@ -288,6 +288,10 @@ class ChannelIn(BaseModel):
     name: str
 
 
+class ChannelBulkCreateIn(BaseModel):
+    names: list[str]
+
+
 class GameIn(BaseModel):
     name: str
     rd_company: str
@@ -534,6 +538,43 @@ def create_channel(payload: ChannelIn, db: Session = Depends(get_db), ctx: dict 
     write_system_audit(db, ctx["user"], "create_channel", "channel", str(channel.id), f"新增渠道: {payload.name}")
     db.commit()
     return {"id": channel.id, "name": channel.name}
+
+
+@app.post("/channels/bulk-create")
+def bulk_create_channels(
+    payload: ChannelBulkCreateIn,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.biz, Role.ops])),
+):
+    success_count = 0
+    failed_names: list[str] = []
+    cleaned_names: list[str] = []
+    seen = set()
+    for raw in payload.names:
+        name = (raw or "").strip()
+        if not name:
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        cleaned_names.append(name)
+    exists = {x.name for x in db.scalars(select(Channel).where(Channel.name.in_(cleaned_names))).all()} if cleaned_names else set()
+    for name in cleaned_names:
+        if name in exists:
+            failed_names.append(name)
+            continue
+        db.add(Channel(name=name))
+        success_count += 1
+    write_system_audit(
+        db,
+        ctx["user"],
+        "bulk_create_channels",
+        "channel",
+        "",
+        f"批量新增渠道: 成功{success_count}, 跳过{len(failed_names)}",
+    )
+    db.commit()
+    return {"success_count": success_count, "failed_count": len(failed_names), "failed_names": failed_names}
 
 
 @app.get("/channels")
