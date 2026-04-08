@@ -2,27 +2,24 @@
 
 import { apiRequest } from "@/lib/api";
 
-export type ExceptionType = "share" | "channel" | "game" | "import" | "overdue";
+export type ExceptionType =
+  | "share"
+  | "channel"
+  | "game"
+  | "import"
+  | "overdue"
+  | "unmatched_channel"
+  | "unmatched_game"
+  | "unmapped_pair"
+  | "variant_unmatched"
+  | "import_failed";
 export type ExceptionStatus = "pending" | "ignored" | "resolved";
 export type ExceptionStatusText = "待处理" | "已忽略" | "已解决";
 export type ExceptionRange = "7d" | "30d" | "90d";
 
 export type ExceptionOverviewResponse = {
-  summary: {
-    total: number;
-    share: number;
-    channel: number;
-    game: number;
-    import: number;
-    overdue: number;
-  };
-  items: {
-    share: Array<Record<string, unknown>>;
-    channel: Array<Record<string, unknown>>;
-    game: Array<Record<string, unknown>>;
-    import: Array<Record<string, unknown>>;
-    overdue: Array<Record<string, unknown>>;
-  };
+  summary: Record<string, number>;
+  items: Record<string, Array<Record<string, unknown>>>;
 };
 
 export async function getExceptionsOverview(params: {

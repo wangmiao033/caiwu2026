@@ -3494,7 +3494,18 @@ def _collect_exception_data(
     status_filter: str = "all",
     type_filter: str = "all",
 ):
-    valid_types = {"share", "channel", "game", "import", "overdue"}
+    valid_types = {
+        "share",
+        "channel",
+        "game",
+        "import",
+        "overdue",
+        "unmatched_channel",
+        "unmatched_game",
+        "unmapped_pair",
+        "variant_unmatched",
+        "import_failed",
+    }
     if type_filter not in {"all", *valid_types}:
         raise HTTPException(status_code=400, detail="type 参数非法")
     if status_filter not in {"all", "pending", "ignored", "resolved"}:
@@ -3518,7 +3529,25 @@ def _collect_exception_data(
             return True
         return status_for(exception_type, exception_id).value == status_filter
 
-    items: dict[str, list[dict]] = {"share": [], "channel": [], "game": [], "import": [], "overdue": []}
+    def allow_with_status(status_value: ExceptionHandleStatus, exception_type: str) -> bool:
+        if type_filter != "all" and exception_type != type_filter:
+            return False
+        if status_filter == "all":
+            return True
+        return status_value.value == status_filter
+
+    items: dict[str, list[dict]] = {
+        "share": [],
+        "channel": [],
+        "game": [],
+        "import": [],
+        "overdue": [],
+        "unmatched_channel": [],
+        "unmatched_game": [],
+        "unmapped_pair": [],
+        "variant_unmatched": [],
+        "import_failed": [],
+    }
 
     map_rows = db.scalars(select(ChannelGameMap)).all()
     for row in map_rows:
@@ -3541,8 +3570,8 @@ def _collect_exception_data(
                 "detected_at": dt.datetime.now().isoformat(),
                 "updated_at": (status_map.get(("share", exception_id)).updated_at.isoformat() if status_map.get(("share", exception_id)) else None),
                 "source_module": "channel_game_map",
-                "channel_name": row.channel.name,
-                "game_name": row.game.name,
+                "channel_name": row.channel.name if row.channel else "",
+                "game_name": row.game.name if row.game else "",
                 "channel_share": channel_share,
                 "tax_rate": tax_rate,
                 "rd_share": rd_share,
@@ -3621,6 +3650,53 @@ def _collect_exception_data(
             }
         )
 
+    # 导入批次异常（ReconIssue）统一接入异常中心
+    issue_rows = (
+        db.execute(
+            select(ReconIssue, ImportHistory)
+            .join(ImportHistory, ImportHistory.task_id == ReconIssue.recon_task_id)
+            .where(ImportHistory.created_at >= cutoff_dt, ImportHistory.lifecycle_status == "active")
+            .order_by(ReconIssue.id.desc())
+        )
+        .all()
+    )
+    issue_type_map = {
+        "unmatched_channel": "unmatched_channel",
+        "unmatched_game": "unmatched_game",
+        "unmapped_pair": "unmapped_pair",
+        "variant_unmatched": "variant_unmatched",
+        "mapping": "unmapped_pair",
+        "import_failed": "import_failed",
+    }
+    for issue, history in issue_rows:
+        normalized_type = issue_type_map.get(issue.issue_type, "import_failed")
+        exception_id = f"recon-{issue.id}"
+        row_status = status_map.get((normalized_type, exception_id))
+        effective_status = row_status.status if row_status else (ExceptionHandleStatus.resolved if issue.resolved else ExceptionHandleStatus.pending)
+        if not allow_with_status(effective_status, normalized_type):
+            continue
+
+        payload = {
+            "id": exception_id,
+            "type": normalized_type,
+            "issue_type": issue.issue_type,
+            "status": effective_status.value,
+            "detected_at": history.created_at.isoformat() if history.created_at else dt.datetime.now().isoformat(),
+            "updated_at": row_status.updated_at.isoformat() if row_status and row_status.updated_at else None,
+            "source_module": "import_issue",
+            "import_history_id": history.id,
+            "task_id": issue.recon_task_id,
+            "period": history.period,
+            "batch_name": history.file_name or f"history-{history.id}",
+            "detail": issue.detail,
+            "status_text": _exception_status_text(effective_status),
+        }
+        if normalized_type == "unmatched_channel":
+            payload["raw_channel_name"] = issue.detail.split(":", 1)[-1].strip() if ":" in issue.detail else issue.detail
+        if normalized_type == "unmatched_game":
+            payload["raw_game_name"] = issue.detail.split(":", 1)[-1].strip() if ":" in issue.detail else issue.detail
+        items[normalized_type].append(payload)
+
     current_period = dt.date.today().strftime("%Y-%m")
     overdue_rows = db.scalars(
         select(Bill).where(
@@ -3657,8 +3733,24 @@ def _collect_exception_data(
         "game": len(items["game"]),
         "import": len(items["import"]),
         "overdue": len(items["overdue"]),
+        "unmatched_channel": len(items["unmatched_channel"]),
+        "unmatched_game": len(items["unmatched_game"]),
+        "unmapped_pair": len(items["unmapped_pair"]),
+        "variant_unmatched": len(items["variant_unmatched"]),
+        "import_failed": len(items["import_failed"]),
     }
-    summary["total"] = summary["share"] + summary["channel"] + summary["game"] + summary["import"] + summary["overdue"]
+    summary["total"] = (
+        summary["share"]
+        + summary["channel"]
+        + summary["game"]
+        + summary["import"]
+        + summary["overdue"]
+        + summary["unmatched_channel"]
+        + summary["unmatched_game"]
+        + summary["unmapped_pair"]
+        + summary["variant_unmatched"]
+        + summary["import_failed"]
+    )
     return {"summary": summary, "items": items}
 
 
@@ -3878,7 +3970,18 @@ def update_exception_status(
     db: Session = Depends(get_db),
     ctx: dict = Depends(require_role([Role.admin, Role.finance_manager])),
 ):
-    if payload.type not in {"share", "channel", "game", "import", "overdue"}:
+    if payload.type not in {
+        "share",
+        "channel",
+        "game",
+        "import",
+        "overdue",
+        "unmatched_channel",
+        "unmatched_game",
+        "unmapped_pair",
+        "variant_unmatched",
+        "import_failed",
+    }:
         raise HTTPException(status_code=400, detail="type 参数非法")
     row = db.scalar(
         select(ExceptionHandleRecord).where(
