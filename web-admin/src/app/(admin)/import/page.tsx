@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   Button,
@@ -142,6 +142,70 @@ type PrecheckKind =
   | "missing_rule_config";
 
 type PreviewRowPrecheck = PreviewRow & { precheck: PrecheckKind; precheckReason?: string };
+
+type ImportActiveTab = "excel" | "manual" | "extract";
+
+type ImportSessionV1 = {
+  v: 1;
+  activeTab: ImportActiveTab;
+  period: string;
+  excel?: {
+    fileName: string;
+    preview: PreviewRow[];
+    fileBase64?: string;
+    fileMime?: string;
+  };
+  manual?: { rows: ManualRow[] };
+  extract?: {
+    extractRows: ExtractRow[];
+    extractSheet: string;
+    titleRow: number;
+    gameCol: string;
+    channelCol: string;
+    amountCol: string;
+    extractSheets: string[];
+    rawHeader: string[];
+    rawBody: (string | number | null)[][];
+    onlyShowExtractErrors: boolean;
+    extractFileName?: string;
+  };
+};
+
+const IMPORT_SESSION_STORAGE_KEY = "caiwu_web_admin_import_session_v1";
+const IMPORT_SESSION_MAX_FILE_BYTES = 4 * 1024 * 1024;
+
+function arrayBufferToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+function base64ToFile(base64: string, fileName: string, mime: string): File {
+  const bin = atob(base64);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) arr[i] = bin.charCodeAt(i);
+  return new File([arr], fileName, { type: mime || "application/octet-stream" });
+}
+
+function enrichPreviewRows(
+  rows: PreviewRow[],
+  variantInfoMap: Record<string, { project_name: string; variant_name: string }>
+): PreviewRow[] {
+  return rows.map((row, idx) => {
+    const matched = variantInfoMap[row.game_name];
+    return {
+      ...row,
+      key: row.key ?? idx + 1,
+      project_name: matched?.project_name || "",
+      variant_name: matched?.variant_name || "",
+      variant_match_status: matched ? "已匹配版本" : "未匹配版本",
+    };
+  });
+}
 
 const PRECHECK_LABEL: Record<PrecheckKind, string> = {
   normal: "正常",
@@ -323,7 +387,9 @@ export default function ImportPage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [selectedFileName, setSelectedFileName] = useState("");
   const [period, setPeriod] = useState("2026-03");
+  const [activeImportTab, setActiveImportTab] = useState<ImportActiveTab>("excel");
   const [preview, setPreview] = useState<PreviewRow[]>([]);
+  const importSessionHydratedRef = useRef(false);
   const [result, setResult] = useState<Record<string, unknown> | null>(null);
   const [channels, setChannels] = useState<OptionItem[]>([]);
   const [games, setGames] = useState<GameOption[]>([]);
@@ -364,6 +430,10 @@ export default function ImportPage() {
   const [uploading, setUploading] = useState(false);
   const [showVariantColumns, setShowVariantColumns] = useState(false);
   const [variantInfoMap, setVariantInfoMap] = useState<Record<string, { project_name: string; variant_name: string }>>({});
+  const variantInfoMapRef = useRef(variantInfoMap);
+  useEffect(() => {
+    variantInfoMapRef.current = variantInfoMap;
+  }, [variantInfoMap]);
   const [unmatchedVariants, setUnmatchedVariants] = useState<UnmatchedVariantRow[]>([]);
   const [unmatchedLoading, setUnmatchedLoading] = useState(false);
   const [quickVariantOpen, setQuickVariantOpen] = useState(false);
@@ -382,7 +452,7 @@ export default function ImportPage() {
   const [extractRows, setExtractRows] = useState<ExtractRow[]>([]);
   const [onlyShowExtractErrors, setOnlyShowExtractErrors] = useState(false);
 
-  const refreshVariantInfoMap = useCallback(async () => {
+  const refreshVariantInfoMap = useCallback(async (): Promise<Record<string, { project_name: string; variant_name: string }>> => {
     try {
       const [projectsData, variantsData] = await Promise.all([
         apiRequest<Array<{ id: number; name: string }>>("/projects"),
@@ -398,8 +468,10 @@ export default function ImportPage() {
         };
       });
       setVariantInfoMap(map);
+      return map;
     } catch {
-      /* ignore */
+      setVariantInfoMap({});
+      return {} as Record<string, { project_name: string; variant_name: string }>;
     }
   }, []);
 
@@ -429,37 +501,199 @@ export default function ImportPage() {
   }, []);
 
   useEffect(() => {
-    reloadTemplateMeta();
-    refreshVariantInfoMap();
-    loadHistory(1);
-    const manualDraft = localStorage.getItem("manual_import_draft");
-    if (manualDraft) {
+    const fromMapping = searchParams.get("from") === "mapping";
+    let sessionHadManual = false;
+    let sessionHadExtract = false;
+
+    const raw = typeof window !== "undefined" ? sessionStorage.getItem(IMPORT_SESSION_STORAGE_KEY) : null;
+    if (raw) {
       try {
-        const draftRows = JSON.parse(manualDraft) as ManualRow[];
-        if (Array.isArray(draftRows) && draftRows.length > 0) {
-          setManualRows(draftRows);
+        const s = JSON.parse(raw) as ImportSessionV1;
+        if (s.v === 1) {
+          setPeriod(s.period);
+          setActiveImportTab(s.activeTab);
+          if (s.excel?.preview?.length) {
+            setSelectedFileName(s.excel.fileName || "");
+            setPreview(s.excel.preview);
+            if (s.excel.fileBase64 && s.excel.fileMime && s.excel.fileName) {
+              try {
+                const approxBytes = (s.excel.fileBase64.length * 3) / 4;
+                if (approxBytes <= IMPORT_SESSION_MAX_FILE_BYTES * 1.2) {
+                  const f = base64ToFile(s.excel.fileBase64, s.excel.fileName, s.excel.fileMime);
+                  setSelectedFile(f);
+                  setFileList([
+                    {
+                      uid: "-restored",
+                      name: f.name,
+                      status: "done",
+                      size: f.size,
+                      type: f.type,
+                      originFileObj: f as RcFile,
+                    },
+                  ]);
+                } else {
+                  throw new Error("too large");
+                }
+              } catch {
+                setSelectedFile(null);
+                setFileList(s.excel.fileName ? [{ uid: "-restored", name: s.excel.fileName, status: "done" }] : []);
+              }
+            } else {
+              setSelectedFile(null);
+              setFileList(s.excel.fileName ? [{ uid: "-restored", name: s.excel.fileName, status: "done" }] : []);
+            }
+          }
+          if (s.manual?.rows && s.manual.rows.length > 0) {
+            setManualRows(s.manual.rows);
+            sessionHadManual = true;
+          }
+          if (s.extract && (s.extract.extractRows?.length || s.extract.rawHeader?.length)) {
+            sessionHadExtract = true;
+            setExtractRows(s.extract.extractRows || []);
+            setExtractSheet(s.extract.extractSheet || "");
+            setTitleRow(typeof s.extract.titleRow === "number" ? s.extract.titleRow : 1);
+            setGameCol(s.extract.gameCol || "");
+            setChannelCol(s.extract.channelCol || "");
+            setAmountCol(s.extract.amountCol || "");
+            setExtractSheets(s.extract.extractSheets || []);
+            setRawHeader(s.extract.rawHeader || []);
+            setRawBody(s.extract.rawBody || []);
+            setOnlyShowExtractErrors(!!s.extract.onlyShowExtractErrors);
+          }
         }
-      } catch {}
+      } catch {
+        /* ignore */
+      }
     }
-    const mappingDraft = localStorage.getItem("extract_mapping_draft");
-    if (mappingDraft) {
-      try {
-        const draft = JSON.parse(mappingDraft) as { gameCol?: string; channelCol?: string; amountCol?: string; titleRow?: number };
-        if (draft.gameCol) setGameCol(draft.gameCol);
-        if (draft.channelCol) setChannelCol(draft.channelCol);
-        if (draft.amountCol) setAmountCol(draft.amountCol);
-        if (typeof draft.titleRow === "number") setTitleRow(draft.titleRow);
-      } catch {}
-    }
-  }, [refreshVariantInfoMap, reloadTemplateMeta]);
+
+    importSessionHydratedRef.current = true;
+
+    let cancelled = false;
+    void (async () => {
+      await refreshVariantInfoMap();
+      if (cancelled) return;
+      reloadTemplateMeta();
+      void loadHistory(1);
+
+      if (!sessionHadManual) {
+        const manualDraft = localStorage.getItem("manual_import_draft");
+        if (manualDraft) {
+          try {
+            const draftRows = JSON.parse(manualDraft) as ManualRow[];
+            if (Array.isArray(draftRows) && draftRows.length > 0) {
+              setManualRows(draftRows);
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+      if (!sessionHadExtract) {
+        const mappingDraft = localStorage.getItem("extract_mapping_draft");
+        if (mappingDraft) {
+          try {
+            const draft = JSON.parse(mappingDraft) as { gameCol?: string; channelCol?: string; amountCol?: string; titleRow?: number };
+            if (draft.gameCol) setGameCol(draft.gameCol);
+            if (draft.channelCol) setChannelCol(draft.channelCol);
+            if (draft.amountCol) setAmountCol(draft.amountCol);
+            if (typeof draft.titleRow === "number") setTitleRow(draft.titleRow);
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+
+      if (fromMapping) {
+        message.success("已从映射页返回，主数据与渠道-游戏映射已刷新，请查看导入前预检");
+        router.replace("/import", { scroll: false });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [searchParams, reloadTemplateMeta, refreshVariantInfoMap, router]);
 
   useEffect(() => {
-    if (searchParams.get("from") !== "mapping") return;
-    reloadTemplateMeta();
-    refreshVariantInfoMap();
-    message.success("已从映射页返回，主数据与渠道-游戏映射已刷新，请查看导入前预检");
-    router.replace("/import", { scroll: false });
-  }, [searchParams, reloadTemplateMeta, refreshVariantInfoMap, router]);
+    if (preview.length === 0) return;
+    setPreview((rows) => enrichPreviewRows(rows, variantInfoMap));
+  }, [variantInfoMap, preview.length]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !importSessionHydratedRef.current) return;
+    const t = window.setTimeout(() => {
+      void (async () => {
+        let excel: ImportSessionV1["excel"];
+        if (preview.length > 0) {
+          let fileBase64: string | undefined;
+          let fileMime: string | undefined;
+          if (selectedFile && selectedFile.size <= IMPORT_SESSION_MAX_FILE_BYTES) {
+            try {
+              const buf = await selectedFile.arrayBuffer();
+              fileBase64 = arrayBufferToBase64(buf);
+              fileMime = selectedFile.type || "application/octet-stream";
+            } catch {
+              /* ignore */
+            }
+          }
+          excel = { fileName: selectedFileName || selectedFile?.name || "import.xlsx", preview, fileBase64, fileMime };
+        }
+        const hasManualData = manualRows.some((r) => r.channel_name || r.game_name || typeof r.gross_amount === "number");
+        const manual: ImportSessionV1["manual"] =
+          hasManualData || manualRows.length > 1 ? { rows: manualRows } : undefined;
+        const extract: ImportSessionV1["extract"] | undefined =
+          extractRows.length > 0 || rawHeader.length > 0
+            ? {
+                extractRows,
+                extractSheet,
+                titleRow,
+                gameCol,
+                channelCol,
+                amountCol,
+                extractSheets,
+                rawHeader,
+                rawBody,
+                onlyShowExtractErrors,
+                extractFileName: extractFile?.name,
+              }
+            : undefined;
+        const payload: ImportSessionV1 = {
+          v: 1,
+          activeTab: activeImportTab,
+          period,
+          excel,
+          manual,
+          extract,
+        };
+        try {
+          sessionStorage.setItem(IMPORT_SESSION_STORAGE_KEY, JSON.stringify(payload));
+        } catch (e) {
+          if (String((e as { name?: string })?.name || "").includes("Quota") || e instanceof DOMException) {
+            message.warning("会话缓存已满，无法保存完整文件；预检数据仍会尽量保留，超大文件请重新选择后再上传");
+          }
+        }
+      })();
+    }, 320);
+    return () => window.clearTimeout(t);
+  }, [
+    activeImportTab,
+    period,
+    preview,
+    selectedFile,
+    selectedFileName,
+    manualRows,
+    extractRows,
+    extractSheet,
+    titleRow,
+    gameCol,
+    channelCol,
+    amountCol,
+    extractSheets,
+    rawHeader,
+    rawBody,
+    onlyShowExtractErrors,
+    extractFile,
+  ]);
 
   const templatePrecheck = useMemo(() => {
     const channelSet = new Set(channels.map((c) => c.name));
@@ -562,19 +796,15 @@ export default function ImportPage() {
       const game = String(r.game_name || "").trim();
       const amount = r.gross_amount as string | number;
       const ok = channel && game && amount !== undefined && amount !== null && amount !== "";
-      const matched = variantInfoMap[game];
       return {
         key: idx + 1,
         channel_name: channel,
         game_name: game,
         gross_amount: amount,
         status: ok ? "正常" : "异常",
-        project_name: matched?.project_name || "",
-        variant_name: matched?.variant_name || "",
-        variant_match_status: matched ? "已匹配版本" : "未匹配版本",
       } as PreviewRow;
     });
-    setPreview(data);
+    setPreview(enrichPreviewRows(data, variantInfoMapRef.current));
   };
 
   const isSupportedTemplateFile = (file: File) => {
@@ -582,12 +812,35 @@ export default function ImportPage() {
     return name.endsWith(".csv") || name.endsWith(".xlsx");
   };
 
-  const clearTemplateFileState = () => {
+  const clearTemplateFileState = useCallback(() => {
     setSelectedFile(null);
     setSelectedFileName("");
     setFileList([]);
     setPreview([]);
-  };
+  }, []);
+
+  const clearImportSessionCache = useCallback(() => {
+    try {
+      sessionStorage.removeItem(IMPORT_SESSION_STORAGE_KEY);
+    } catch {
+      /* ignore */
+    }
+    clearTemplateFileState();
+    setManualRows([{ key: Date.now() }]);
+    setExtractFile(null);
+    setExtractSheets([]);
+    setExtractSheet("");
+    setTitleRow(1);
+    setRawHeader([]);
+    setRawBody([]);
+    setGameCol("");
+    setChannelCol("");
+    setAmountCol("");
+    setExtractRows([]);
+    setOnlyShowExtractErrors(false);
+    setActiveImportTab("excel");
+    message.success("已清空当前会话的导入预检缓存");
+  }, [clearTemplateFileState]);
 
   const handleTemplateFileSelect = async (file: RcFile) => {
     if (!isSupportedTemplateFile(file)) {
@@ -816,7 +1069,9 @@ export default function ImportPage() {
 
   const upload = async () => {
     if (!selectedFile) {
-      message.warning("请先选择文件");
+      message.warning(
+        "当前无可上传的本地文件。若刚从映射页返回且预检已恢复，请重新选择同一文件后再上传；列表与预检数据仍会保留。"
+      );
       return;
     }
     if (templatePrecheck.blocked) {
@@ -1015,8 +1270,9 @@ export default function ImportPage() {
     try {
       setLoading(true);
       const data = await apiRequestDirect<{ rows: ExtractRow[] }>("/api/recon/preview", "POST", fd, true);
+      const map = variantInfoMapRef.current;
       const enriched = (data.rows || []).map((row) => {
-        const matched = variantInfoMap[row.game_name];
+        const matched = map[row.game_name];
         return {
           ...row,
           project_name: matched?.project_name || "",
@@ -1075,8 +1331,13 @@ export default function ImportPage() {
           <Form.Item label="账期">
             <Input value={period} onChange={(e) => setPeriod(e.target.value)} />
           </Form.Item>
+          <Form.Item>
+            <Button onClick={clearImportSessionCache}>清空当前预检（会话）</Button>
+          </Form.Item>
         </Form>
         <Tabs
+          activeKey={activeImportTab}
+          onChange={(k) => setActiveImportTab(k as ImportActiveTab)}
           style={{ marginTop: 12 }}
           items={[
             {
