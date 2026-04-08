@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Button, Card, Form, Input, InputNumber, Modal, Select, Space, Table, Tag, message } from "antd";
 import { apiRequest } from "@/lib/api";
 import { buildExportFilename, exportRowsToCsv, exportRowsToXlsx } from "@/lib/export";
@@ -19,6 +20,9 @@ type BulkInputItem = { channel_name: string; game_name: string };
 type BulkPreviewRow = { key: string; channel_name: string; game_name: string; status: string; reason: string };
 
 export default function ChannelGameMapPage() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const returnToImportRef = useRef(false);
   const [rows, setRows] = useState<Row[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [games, setGames] = useState<Game[]>([]);
@@ -73,6 +77,11 @@ export default function ChannelGameMapPage() {
       setEditing(null);
       form.resetFields();
       load();
+      if (returnToImportRef.current) {
+        returnToImportRef.current = false;
+        message.success("映射已保存，正在返回导入页");
+        router.push("/import?from=mapping");
+      }
     } catch (e) {
       message.error((e as Error).message);
     }
@@ -188,6 +197,28 @@ export default function ChannelGameMapPage() {
   useEffect(() => {
     load();
   }, []);
+
+  useEffect(() => {
+    if (searchParams.get("add") !== "1") return;
+    if (!channels.length || !games.length) return;
+    const chName = (searchParams.get("channel") || "").trim();
+    const gmName = (searchParams.get("game") || "").trim();
+    if (searchParams.get("return") === "import") returnToImportRef.current = true;
+    if (chName) setQChannel(chName);
+    if (gmName) setQGame(gmName);
+    const ch = chName ? channels.find((x) => x.name === chName) : undefined;
+    const gm = gmName ? games.find((x) => x.name === gmName) : undefined;
+    setEditing(null);
+    form.resetFields();
+    form.setFieldsValue({
+      channel_id: ch?.id,
+      game_id: gm?.id,
+      revenue_share_ratio: undefined,
+      rd_settlement_ratio: typeof gm?.rd_share_percent === "number" ? gm.rd_share_percent : 0,
+    });
+    setOpen(true);
+    router.replace("/channel-game-map", { scroll: false });
+  }, [channels, games, searchParams, form, router]);
   const channelSharePercent = Form.useWatch("revenue_share_ratio", form) as number | undefined;
   const rdSharePercent = Form.useWatch("rd_settlement_ratio", form) as number | undefined;
   const gameId = Form.useWatch("game_id", form) as number | undefined;
@@ -245,6 +276,7 @@ export default function ChannelGameMapPage() {
           <Button
             type="primary"
             onClick={() => {
+              returnToImportRef.current = false;
               setEditing(null);
               form.resetFields();
               setOpen(true);
@@ -312,6 +344,7 @@ export default function ChannelGameMapPage() {
                 <Button
                   size="small"
                   onClick={() => {
+                    returnToImportRef.current = false;
                     const channel = channels.find((x) => x.name === r.channel);
                     const game = games.find((x) => x.name === r.game);
                     if (!channel || !game) return;
@@ -335,7 +368,15 @@ export default function ChannelGameMapPage() {
           },
         ]}
       />
-      <Modal open={open} title={editing ? "编辑映射" : "新增映射"} onCancel={() => setOpen(false)} onOk={submit}>
+      <Modal
+        open={open}
+        title={editing ? "编辑映射" : "新增映射"}
+        onCancel={() => {
+          returnToImportRef.current = false;
+          setOpen(false);
+        }}
+        onOk={submit}
+      >
         <Form form={form} layout="vertical">
           <Form.Item name="channel_id" label="渠道" rules={[{ required: true }]}>
             <Select

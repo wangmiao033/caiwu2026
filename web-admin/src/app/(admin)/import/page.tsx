@@ -1,10 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   Button,
   Card,
+  Collapse,
   Drawer,
   Empty,
   Form,
@@ -123,8 +124,29 @@ type ExtractRow = {
   variant_match_status?: "已匹配版本" | "未匹配版本";
 };
 
+type PrecheckKind = "normal" | "unmatched_channel" | "unmatched_game" | "unmapped_pair" | "unmatched_variant" | "invalid_row";
+
+type PreviewRowPrecheck = PreviewRow & { precheck: PrecheckKind };
+
+const PRECHECK_LABEL: Record<PrecheckKind, string> = {
+  normal: "正常",
+  unmatched_channel: "未匹配渠道",
+  unmatched_game: "未匹配游戏",
+  unmapped_pair: "未映射组合",
+  unmatched_variant: "未匹配版本",
+  invalid_row: "数据不完整",
+};
+
+function buildMapQuickHref(channel: string, game: string) {
+  const qs = new URLSearchParams({ add: "1", return: "import" });
+  if (channel) qs.set("channel", channel);
+  if (game) qs.set("game", game);
+  return `/channel-game-map?${qs.toString()}`;
+}
+
 export default function ImportPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [selectedFileName, setSelectedFileName] = useState("");
@@ -208,7 +230,7 @@ export default function ImportPage() {
     }
   }, []);
 
-  useEffect(() => {
+  const reloadTemplateMeta = useCallback(() => {
     apiRequest<OptionItem[]>("/channels")
       .then(setChannels)
       .catch(() => {});
@@ -218,6 +240,10 @@ export default function ImportPage() {
     apiRequest<{ channel: string; game: string }[]>("/channel-game-map")
       .then((data) => setMaps(data.map((x, idx) => ({ id: idx + 1, channel: x.channel, game: x.game }))))
       .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    reloadTemplateMeta();
     refreshVariantInfoMap();
     loadHistory(1);
     const manualDraft = localStorage.getItem("manual_import_draft");
@@ -239,7 +265,62 @@ export default function ImportPage() {
         if (typeof draft.titleRow === "number") setTitleRow(draft.titleRow);
       } catch {}
     }
-  }, [refreshVariantInfoMap]);
+  }, [refreshVariantInfoMap, reloadTemplateMeta]);
+
+  useEffect(() => {
+    if (searchParams.get("from") !== "mapping") return;
+    reloadTemplateMeta();
+    refreshVariantInfoMap();
+    message.success("已从映射页返回，主数据与渠道-游戏映射已刷新，请查看导入前预检");
+    router.replace("/import", { scroll: false });
+  }, [searchParams, reloadTemplateMeta, refreshVariantInfoMap, router]);
+
+  const templatePrecheck = useMemo(() => {
+    const channelSet = new Set(channels.map((c) => c.name));
+    const gameSet = new Set(games.map((g) => g.name));
+    const mapSet = new Set(maps.map((m) => `${m.channel}::${m.game}`));
+    const counts: Record<PrecheckKind, number> = {
+      normal: 0,
+      unmatched_channel: 0,
+      unmatched_game: 0,
+      unmapped_pair: 0,
+      unmatched_variant: 0,
+      invalid_row: 0,
+    };
+    const rowsWithPrecheck: PreviewRowPrecheck[] = preview.map((row) => {
+      const ch = String(row.channel_name || "").trim();
+      const gm = String(row.game_name || "").trim();
+      const amt = row.gross_amount;
+      const amtOk = amt !== undefined && amt !== null && String(amt).trim() !== "";
+      let precheck: PrecheckKind;
+      if (!ch || !gm || !amtOk || row.status === "异常") {
+        precheck = "invalid_row";
+      } else if (!channelSet.has(ch)) {
+        precheck = "unmatched_channel";
+      } else if (!gameSet.has(gm)) {
+        precheck = "unmatched_game";
+      } else if (!mapSet.has(`${ch}::${gm}`)) {
+        precheck = "unmapped_pair";
+      } else if (row.variant_match_status === "未匹配版本") {
+        precheck = "unmatched_variant";
+      } else {
+        precheck = "normal";
+      }
+      counts[precheck] += 1;
+      return { ...row, precheck };
+    });
+    const blocked =
+      counts.unmatched_channel > 0 || counts.unmatched_game > 0 || counts.unmapped_pair > 0 || counts.invalid_row > 0;
+    const grouped = {
+      unmatched_channel: rowsWithPrecheck.filter((r) => r.precheck === "unmatched_channel"),
+      unmatched_game: rowsWithPrecheck.filter((r) => r.precheck === "unmatched_game"),
+      unmapped_pair: rowsWithPrecheck.filter((r) => r.precheck === "unmapped_pair"),
+      unmatched_variant: rowsWithPrecheck.filter((r) => r.precheck === "unmatched_variant"),
+      normal: rowsWithPrecheck.filter((r) => r.precheck === "normal"),
+      invalid_row: rowsWithPrecheck.filter((r) => r.precheck === "invalid_row"),
+    };
+    return { rowsWithPrecheck, counts, grouped, blocked };
+  }, [preview, channels, games, maps]);
 
   const parseFile = async (f: File) => {
     const buf = await f.arrayBuffer();
@@ -506,6 +587,10 @@ export default function ImportPage() {
   const upload = async () => {
     if (!selectedFile) {
       message.warning("请先选择文件");
+      return;
+    }
+    if (templatePrecheck.blocked) {
+      message.error("导入前预检未通过：请先处理未匹配渠道、未匹配游戏、未映射组合或数据不完整等问题后再导入");
       return;
     }
     console.debug("[import/template] upload clicked", { selectedFileName: selectedFile.name, size: selectedFile.size });
@@ -788,6 +873,71 @@ export default function ImportPage() {
                     <Button onClick={exportExceptions}>异常导出</Button>
                     <Button onClick={() => router.push("/recon-tasks")}>去导入数据中心</Button>
                   </Space>
+                  {preview.length > 0 ? (
+                    <Card size="small" title="导入前预检" style={{ marginTop: 8 }}>
+                      <Space wrap style={{ marginBottom: 12 }}>
+                        <Statistic title={PRECHECK_LABEL.normal} value={templatePrecheck.counts.normal} />
+                        <Statistic title={PRECHECK_LABEL.invalid_row} value={templatePrecheck.counts.invalid_row} valueStyle={{ color: "#cf1322" }} />
+                        <Statistic title={PRECHECK_LABEL.unmatched_channel} value={templatePrecheck.counts.unmatched_channel} valueStyle={{ color: "#cf1322" }} />
+                        <Statistic title={PRECHECK_LABEL.unmatched_game} value={templatePrecheck.counts.unmatched_game} valueStyle={{ color: "#cf1322" }} />
+                        <Statistic title={PRECHECK_LABEL.unmapped_pair} value={templatePrecheck.counts.unmapped_pair} valueStyle={{ color: "#fa8c16" }} />
+                        <Statistic title={PRECHECK_LABEL.unmatched_variant} value={templatePrecheck.counts.unmatched_variant} valueStyle={{ color: "#faad14" }} />
+                      </Space>
+                      <Tag color={templatePrecheck.blocked ? "red" : "green"} style={{ marginBottom: 8 }}>
+                        {templatePrecheck.blocked
+                          ? "存在阻断项：未匹配渠道 / 未匹配游戏 / 未映射组合 / 数据不完整，无法导入"
+                          : "预检通过（未匹配版本不阻断，可在导入后处理）"}
+                      </Tag>
+                      <Collapse
+                        size="small"
+                        items={(
+                          [
+                            "invalid_row",
+                            "unmatched_channel",
+                            "unmatched_game",
+                            "unmapped_pair",
+                            "unmatched_variant",
+                            "normal",
+                          ] as PrecheckKind[]
+                        )
+                          .filter((k) => (templatePrecheck.grouped as Record<string, PreviewRowPrecheck[]>)[k]?.length > 0)
+                          .map((kind) => ({
+                            key: kind,
+                            label: `${PRECHECK_LABEL[kind]}（${templatePrecheck.counts[kind]} 条）`,
+                            children: (
+                              <Table
+                                size="small"
+                                rowKey="key"
+                                dataSource={templatePrecheck.grouped[kind as keyof typeof templatePrecheck.grouped]}
+                                pagination={{ pageSize: 5 }}
+                                columns={[
+                                  { title: "渠道", dataIndex: "channel_name" },
+                                  { title: "游戏", dataIndex: "game_name" },
+                                  { title: "流水", dataIndex: "gross_amount" },
+                                  ...(kind === "unmapped_pair"
+                                    ? [
+                                        {
+                                          title: "快捷处理",
+                                          width: 140,
+                                          render: (_: unknown, r: PreviewRowPrecheck) => (
+                                            <Button
+                                              type="link"
+                                              size="small"
+                                              onClick={() => router.push(buildMapQuickHref(r.channel_name, r.game_name))}
+                                            >
+                                              去渠道-游戏映射
+                                            </Button>
+                                          ),
+                                        },
+                                      ]
+                                    : []),
+                                ]}
+                              />
+                            ),
+                          }))}
+                      />
+                    </Card>
+                  ) : null}
                   <Table
                     rowKey="key"
                     dataSource={preview}
