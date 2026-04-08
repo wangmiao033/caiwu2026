@@ -2856,6 +2856,14 @@ def confirm_recon(task_id: int, db: Session = Depends(get_db), _: dict = Depends
     unresolved = db.scalar(select(func.count(ReconIssue.id)).where(ReconIssue.recon_task_id == task_id, ReconIssue.resolved.is_(False)))
     if unresolved > 0:
         raise HTTPException(status_code=400, detail="仍有异常未处理")
+    for h in db.scalars(select(ImportHistory).where(ImportHistory.period == task.period)).all():
+        if h.task_id == task_id:
+            continue
+        if (h.lifecycle_status or "active") != "active":
+            continue
+        other = db.get(ReconTask, h.task_id)
+        if other and other.status == ReconStatus.confirmed:
+            raise HTTPException(status_code=400, detail=BILLING_PERIOD_MULTI_ACTIVE_CONFIRMED_IMPORTS)
     task.status = ReconStatus.confirmed
     write_system_audit(db, _["user"], "confirm_recon_period", "recon_task", str(task.id), f"确认账期: {task.period}")
     db.commit()
@@ -3592,6 +3600,27 @@ def export_rules(db: Session = Depends(get_db), _: dict = Depends(require_role([
 
 BILL_SUSPICIOUS_CHANNEL_BUCKET = "未匹配渠道（原始流水渠道名需修正）"
 
+# 账单生成：同一账期仅允许一条「lifecycle=active + 任务已确认」的导入批次，避免多批 raw 静默合并导致金额偏大
+BILLING_PERIOD_MULTI_ACTIVE_CONFIRMED_IMPORTS = (
+    "该账期存在多条已确认且有效的导入批次，请先撤销或作废旧批次后再生成账单。"
+)
+
+
+def _active_confirmed_recon_task_ids_for_billing(db: Session, period: str) -> list[int]:
+    """收集账期内「导入批次仍有效」且「对应核对任务已确认」的 task_id（去重、顺序稳定）。"""
+    out: list[int] = []
+    seen: set[int] = set()
+    for h in db.scalars(select(ImportHistory).where(ImportHistory.period == period)).all():
+        if (h.lifecycle_status or "active") != "active":
+            continue
+        t = db.get(ReconTask, h.task_id)
+        if not t or t.period != period or t.status != ReconStatus.confirmed:
+            continue
+        if h.task_id not in seen:
+            seen.add(h.task_id)
+            out.append(h.task_id)
+    return out
+
 
 def _is_placeholder_channel_label(name: Optional[str]) -> bool:
     """占位或明显异常的渠道名字符串：不作为对外账单渠道名展示。"""
@@ -3646,10 +3675,22 @@ def generate_bills(
     # 与列表默认口径一致：仅当仍有「未作废」账单时禁止重复生成；全部为 discarded 时可重新生成
     if active_period_bills and not overwrite:
         raise HTTPException(status_code=400, detail="该账期账单已存在")
-    recon_tasks = db.scalars(select(ReconTask).where(ReconTask.period == period, ReconTask.status == ReconStatus.confirmed)).all()
-    if not recon_tasks:
-        raise HTTPException(status_code=400, detail="该账期无已确认核对任务")
-    task_ids = [x.id for x in recon_tasks]
+    task_ids = _active_confirmed_recon_task_ids_for_billing(db, period)
+    if len(task_ids) > 1:
+        raise HTTPException(status_code=400, detail=BILLING_PERIOD_MULTI_ACTIVE_CONFIRMED_IMPORTS)
+    if len(task_ids) == 1:
+        recon_tasks = [db.get(ReconTask, task_ids[0])]
+        if not recon_tasks[0]:
+            raise HTTPException(status_code=400, detail="该账期无已确认核对任务")
+        task_ids = [recon_tasks[0].id]
+    else:
+        any_confirmed = db.scalars(select(ReconTask).where(ReconTask.period == period, ReconTask.status == ReconStatus.confirmed)).all()
+        if not any_confirmed:
+            raise HTTPException(status_code=400, detail="该账期无已确认核对任务")
+        raise HTTPException(
+            status_code=400,
+            detail="该账期无已确认且有效的导入批次（可能均已作废），请先在导入数据中心恢复有效批次或撤销入账后再生成账单。",
+        )
     rows = db.scalars(select(RawStatement).where(RawStatement.recon_task_id.in_(task_ids))).all()
     if not rows:
         raise HTTPException(status_code=400, detail="无原始数据")
