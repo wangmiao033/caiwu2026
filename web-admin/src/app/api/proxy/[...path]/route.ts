@@ -1,8 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 
 const backendBase = process.env.BACKEND_BASE_URL || "http://127.0.0.1:8000";
+const runningOnVercel = Boolean(process.env.VERCEL);
 
 async function forward(request: NextRequest, path: string[]) {
+  if (runningOnVercel && !process.env.BACKEND_BASE_URL) {
+    return NextResponse.json(
+      { detail: "环境变量缺失：web-admin 未配置 BACKEND_BASE_URL，无法转发登录请求" },
+      { status: 500 }
+    );
+  }
   const url = `${backendBase}/${path.join("/")}${request.nextUrl.search}`;
   const method = request.method;
   const headers = new Headers();
@@ -19,7 +26,16 @@ async function forward(request: NextRequest, path: string[]) {
   if (method !== "GET" && method !== "HEAD") {
     const contentType = request.headers.get("content-type") || "";
     if (contentType.includes("multipart/form-data")) {
-      body = await request.formData();
+      // 原样透传 multipart：避免 formData() 在函数内完整解析/再封装导致体积与内存暴涨，触发 payload 上限。
+      const ct = request.headers.get("content-type");
+      if (ct) {
+        headers.set("content-type", ct);
+      }
+      const contentLength = request.headers.get("content-length");
+      if (contentLength) {
+        headers.set("content-length", contentLength);
+      }
+      body = request.body ?? undefined;
     } else {
       body = await request.text();
       if (contentType) {
@@ -28,16 +44,28 @@ async function forward(request: NextRequest, path: string[]) {
     }
   }
 
-  const resp = await fetch(url, { method, headers, body });
-  const outHeaders = new Headers();
-  const respType = resp.headers.get("content-type");
-  if (respType) {
-    outHeaders.set("content-type", respType);
+  try {
+    const fetchInit: RequestInit & { duplex?: "half" } = { method, headers, body };
+    if (body instanceof ReadableStream) {
+      fetchInit.duplex = "half";
+    }
+    const resp = await fetch(url, fetchInit);
+    const outHeaders = new Headers();
+    const respType = resp.headers.get("content-type");
+    if (respType) {
+      outHeaders.set("content-type", respType);
+    }
+    return new NextResponse(await resp.arrayBuffer(), {
+      status: resp.status,
+      headers: outHeaders,
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "unknown";
+    return NextResponse.json(
+      { detail: `代理转发失败：无法访问后端 ${backendBase}，请检查 BACKEND_BASE_URL 与后端服务状态。(${reason})` },
+      { status: 502 }
+    );
   }
-  return new NextResponse(await resp.arrayBuffer(), {
-    status: resp.status,
-    headers: outHeaders,
-  });
 }
 
 export async function GET(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
