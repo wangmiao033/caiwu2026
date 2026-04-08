@@ -1,44 +1,36 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Button, Card, Form, Input, InputNumber, Modal, Select, Space, Table, Tag, message } from "antd";
+import { Button, Card, Input, Modal, Select, Space, Table, Tag, message } from "antd";
 import { apiRequest } from "@/lib/api";
 import { buildExportFilename, exportRowsToCsv, exportRowsToXlsx } from "@/lib/export";
 import RoleGuard from "@/components/RoleGuard";
+import {
+  calcPublishRatio,
+  isTotalValid,
+  type Channel,
+  type Game,
+  type MapRow,
+  toPercent,
+  toRatio,
+} from "./channel-game-map-shared";
 
-type Channel = { id: number; name: string };
-type Game = { id: number; name: string; rd_share_percent?: number };
-type Row = {
-  id: number;
-  channel: string;
-  game: string;
-  revenue_share_ratio: number;
-  rd_settlement_ratio: number;
-};
 type BulkInputItem = { channel_name: string; game_name: string };
 type BulkPreviewRow = { key: string; channel_name: string; game_name: string; status: string; reason: string };
 
 export default function ChannelGameMapPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const returnToImportRef = useRef(false);
-  const [rows, setRows] = useState<Row[]>([]);
+  const [rows, setRows] = useState<MapRow[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [games, setGames] = useState<Game[]>([]);
   const [qChannel, setQChannel] = useState("");
   const [qGame, setQGame] = useState("");
-  const [open, setOpen] = useState(false);
   const [openBulk, setOpenBulk] = useState(false);
-  const [editing, setEditing] = useState<Row | null>(null);
   const [bulkText, setBulkText] = useState("");
   const [bulkPreview, setBulkPreview] = useState<BulkPreviewRow[]>([]);
   const [bulkLoading, setBulkLoading] = useState(false);
-  const [form] = Form.useForm();
-  const toPercent = (ratio: number) => Number((ratio * 100).toFixed(2));
-  const toRatio = (percent: number) => Number((percent / 100).toFixed(4));
-  const calcPublishRatio = (channelRatio: number, rdRatio: number) => Number((1 - channelRatio - rdRatio).toFixed(4));
-  const isTotalValid = (channelRatio: number, rdRatio: number, publishRatio: number) => Math.abs(channelRatio + rdRatio + publishRatio - 1) < 0.0001;
 
   const loadMeta = async () => {
     const [c, g] = await Promise.all([apiRequest<Channel[]>("/channels"), apiRequest<Game[]>("/games")]);
@@ -48,40 +40,7 @@ export default function ChannelGameMapPage() {
   const load = async () => {
     try {
       await loadMeta();
-      setRows(await apiRequest<Row[]>("/channel-game-map"));
-    } catch (e) {
-      message.error((e as Error).message);
-    }
-  };
-
-  const submit = async () => {
-    const values = await form.validateFields();
-    const channelPercent = Number(values.revenue_share_ratio || 0);
-    const rdPercent = Number(values.rd_settlement_ratio || 0);
-    if (channelPercent + rdPercent > 100) {
-      message.error("渠道分成与研发分成之和不能大于100%");
-      return;
-    }
-    const payload = {
-      ...values,
-      revenue_share_ratio: toRatio(channelPercent),
-      rd_settlement_ratio: toRatio(rdPercent),
-    };
-    try {
-      if (editing) {
-        await apiRequest(`/channel-game-map/${editing.id}`, "PUT", payload);
-      } else {
-        await apiRequest("/channel-game-map", "POST", payload);
-      }
-      setOpen(false);
-      setEditing(null);
-      form.resetFields();
-      load();
-      if (returnToImportRef.current) {
-        returnToImportRef.current = false;
-        message.success("映射已保存，正在返回导入页");
-        router.push("/import?from=mapping");
-      }
+      setRows(await apiRequest<MapRow[]>("/channel-game-map"));
     } catch (e) {
       message.error((e as Error).message);
     }
@@ -211,255 +170,147 @@ export default function ChannelGameMapPage() {
     if (!channels.length || !games.length) return;
     const chName = (searchParams.get("channel") || "").trim();
     const gmName = (searchParams.get("game") || "").trim();
-    if (searchParams.get("return") === "import") returnToImportRef.current = true;
-    if (chName) setQChannel(chName);
-    if (gmName) setQGame(gmName);
-    const ch = chName ? channels.find((x) => x.name === chName) : undefined;
-    const gm = gmName ? games.find((x) => x.name === gmName) : undefined;
-    setEditing(null);
-    form.resetFields();
-    form.setFieldsValue({
-      channel_id: ch?.id,
-      game_id: gm?.id,
-      revenue_share_ratio: undefined,
-      rd_settlement_ratio: typeof gm?.rd_share_percent === "number" ? gm.rd_share_percent : 0,
-    });
-    setOpen(true);
-    router.replace("/channel-game-map", { scroll: false });
-  }, [channels, games, searchParams, form, router]);
-  const channelSharePercent = Form.useWatch("revenue_share_ratio", form) as number | undefined;
-  const rdSharePercent = Form.useWatch("rd_settlement_ratio", form) as number | undefined;
-  const gameId = Form.useWatch("game_id", form) as number | undefined;
-
-  useEffect(() => {
-    if (!gameId) return;
-    const g = games.find((x) => x.id === gameId);
-    if (!g || typeof g.rd_share_percent !== "number") return;
-    const current = Number(form.getFieldValue("rd_settlement_ratio"));
-    if (Number.isFinite(current) && Math.abs(current - g.rd_share_percent) < 0.0001) return;
-    form.setFieldValue("rd_settlement_ratio", g.rd_share_percent);
-  }, [gameId, games, form]);
-
-  const publishSharePercent =
-    typeof channelSharePercent === "number" && typeof rdSharePercent === "number"
-      ? Number((100 - channelSharePercent - rdSharePercent).toFixed(2))
-      : undefined;
-  const totalPercent =
-    typeof channelSharePercent === "number" && typeof rdSharePercent === "number" && typeof publishSharePercent === "number"
-      ? Number((channelSharePercent + rdSharePercent + publishSharePercent).toFixed(2))
-      : undefined;
-
-  const filterOptionContains = (input: string, option?: { label?: unknown; value?: unknown }) => {
-    const label = String(option?.label ?? "");
-    return label.toLowerCase().includes((input || "").toLowerCase());
-  };
+    const sp = new URLSearchParams();
+    if (chName) sp.set("channel", chName);
+    if (gmName) sp.set("game", gmName);
+    if (searchParams.get("return") === "import") sp.set("return", "import");
+    const qs = sp.toString();
+    router.replace(qs ? `/channel-game-map/new?${qs}` : "/channel-game-map/new", { scroll: false });
+  }, [channels, games, searchParams, router]);
 
   return (
     <RoleGuard allow={["admin", "finance_manager", "tech"]}>
       <Card
-      title="渠道-游戏映射"
-      extra={
-        <Space>
-          <Select
-            allowClear
-            placeholder="按渠道筛选"
-            style={{ width: 160 }}
-            options={channels.map((x) => ({ label: x.name, value: x.name }))}
-            value={qChannel || undefined}
-            onChange={(v) => setQChannel(v || "")}
-          />
-          <Select
-            allowClear
-            placeholder="按游戏筛选"
-            style={{ width: 160 }}
-            options={games.map((x) => ({ label: x.name, value: x.name }))}
-            value={qGame || undefined}
-            onChange={(v) => setQGame(v || "")}
-          />
-          <Button onClick={load}>刷新</Button>
-          <Button onClick={exportCurrent}>导出当前筛选</Button>
-          <Button onClick={downloadMappingTemplateCsv}>下载映射模板(CSV)</Button>
-          <Button onClick={downloadMappingTemplateXlsx}>下载映射模板(XLSX)</Button>
-          <Button onClick={() => setOpenBulk(true)}>批量导入</Button>
-          <Button
-            type="primary"
-            onClick={() => {
-              returnToImportRef.current = false;
-              setEditing(null);
-              form.resetFields();
-              setOpen(true);
-            }}
-          >
-            新增映射
-          </Button>
-        </Space>
-      }
-    >
-      <Table
-        rowKey="id"
-        dataSource={filtered}
-        pagination={{ pageSize: 10 }}
-        columns={[
-          { title: "ID", dataIndex: "id", width: 90 },
-          { title: "渠道", dataIndex: "channel" },
-          { title: "游戏", dataIndex: "game" },
-          { title: "渠道分成", dataIndex: "revenue_share_ratio", render: (v: number) => `${toPercent(v)}%` },
-          {
-            title: "研发分成",
-            render: (_, r) => {
-              const g = games.find((x) => x.name === r.game);
-              const fromGame = g && typeof g.rd_share_percent === "number";
-              const rdRatio = fromGame ? toRatio(g.rd_share_percent as number) : r.rd_settlement_ratio;
-              return (
-                <Space size={6}>
-                  <span>{`${toPercent(rdRatio)}%`}</span>
-                  {fromGame ? <Tag color="blue">来自游戏</Tag> : null}
-                </Space>
-              );
-            },
-          },
-          {
-            title: "发行分成",
-            render: (_, r) => {
-              const g = games.find((x) => x.name === r.game);
-              const rdRatio = g && typeof g.rd_share_percent === "number" ? toRatio(g.rd_share_percent) : r.rd_settlement_ratio;
-              return `${toPercent(calcPublishRatio(r.revenue_share_ratio, rdRatio))}%`;
-            },
-          },
-          {
-            title: "合计",
-            render: (_, r) => {
-              const g = games.find((x) => x.name === r.game);
-              const rdRatio = g && typeof g.rd_share_percent === "number" ? toRatio(g.rd_share_percent) : r.rd_settlement_ratio;
-              const publishRatio = calcPublishRatio(r.revenue_share_ratio, rdRatio);
-              return `${toPercent(r.revenue_share_ratio + rdRatio + publishRatio)}%`;
-            },
-          },
-          {
-            title: "校验状态",
-            render: (_, r) => {
-              const g = games.find((x) => x.name === r.game);
-              const rdRatio = g && typeof g.rd_share_percent === "number" ? toRatio(g.rd_share_percent) : r.rd_settlement_ratio;
-              const publishRatio = calcPublishRatio(r.revenue_share_ratio, rdRatio);
-              const ok = isTotalValid(r.revenue_share_ratio, rdRatio, publishRatio);
-              return <Tag color={ok ? "green" : "red"}>{ok ? "正常" : "异常"}</Tag>;
-            },
-          },
-          {
-            title: "操作",
-            render: (_, r) => (
-              <Space>
-                <Button
-                  size="small"
-                  onClick={() => {
-                    returnToImportRef.current = false;
-                    const channel = channels.find((x) => x.name === r.channel);
-                    const game = games.find((x) => x.name === r.game);
-                    if (!channel || !game) return;
-                    setEditing(r);
-                    form.setFieldsValue({
-                      channel_id: channel.id,
-                      game_id: game.id,
-                      revenue_share_ratio: toPercent(r.revenue_share_ratio),
-                      rd_settlement_ratio: typeof game.rd_share_percent === "number" ? game.rd_share_percent : toPercent(r.rd_settlement_ratio),
-                    });
-                    setOpen(true);
-                  }}
-                >
-                  编辑
-                </Button>
-                <Button size="small" danger onClick={() => remove(r.id)}>
-                  删除
-                </Button>
-              </Space>
-            ),
-          },
-        ]}
-      />
-      <Modal
-        open={open}
-        title={editing ? "编辑映射" : "新增映射"}
-        onCancel={() => {
-          returnToImportRef.current = false;
-          setOpen(false);
-        }}
-        onOk={submit}
-      >
-        <Form form={form} layout="vertical">
-          <Form.Item name="channel_id" label="渠道" rules={[{ required: true }]}>
+        title="渠道-游戏映射"
+        extra={
+          <Space>
             <Select
               allowClear
-              showSearch
-              placeholder="请选择渠道（支持搜索/粘贴关键字）"
-              options={channels.map((x) => ({ label: x.name, value: x.id }))}
-              optionFilterProp="label"
-              filterOption={filterOptionContains}
+              placeholder="按渠道筛选"
+              style={{ width: 160 }}
+              options={channels.map((x) => ({ label: x.name, value: x.name }))}
+              value={qChannel || undefined}
+              onChange={(v) => setQChannel(v || "")}
             />
-          </Form.Item>
-          <Form.Item name="game_id" label="游戏" rules={[{ required: true }]}>
             <Select
               allowClear
-              showSearch
-              placeholder="请选择游戏（支持搜索/粘贴关键字）"
-              options={games.map((x) => ({ label: x.name, value: x.id }))}
-              optionFilterProp="label"
-              filterOption={filterOptionContains}
+              placeholder="按游戏筛选"
+              style={{ width: 160 }}
+              options={games.map((x) => ({ label: x.name, value: x.name }))}
+              value={qGame || undefined}
+              onChange={(v) => setQGame(v || "")}
             />
-          </Form.Item>
-          <Form.Item name="revenue_share_ratio" label="渠道分成(%)" rules={[{ required: true }]}>
-            <InputNumber min={0} max={100} step={0.01} style={{ width: "100%" }} />
-          </Form.Item>
-          <Form.Item
-            name="rd_settlement_ratio"
-            label="研发分成(%)（来自游戏固定值）"
-            rules={[{ required: true }]}
-            tooltip="研发分成来自游戏主数据，映射中不再单独维护"
-          >
-            <InputNumber min={0} max={100} step={0.01} style={{ width: "100%" }} disabled />
-          </Form.Item>
-          <Form.Item label="发行分成(%)">
-            <InputNumber value={publishSharePercent} disabled style={{ width: "100%" }} />
-          </Form.Item>
-          <Form.Item label="合计(%)">
-            <InputNumber value={totalPercent} disabled style={{ width: "100%" }} />
-          </Form.Item>
-        </Form>
-      </Modal>
-      <Modal
-        open={openBulk}
-        title="批量添加渠道游戏映射"
-        onCancel={() => setOpenBulk(false)}
-        onOk={submitBulk}
-        okText="确认导入"
-        confirmLoading={bulkLoading}
-        width={860}
+            <Button onClick={load}>刷新</Button>
+            <Button onClick={exportCurrent}>导出当前筛选</Button>
+            <Button onClick={downloadMappingTemplateCsv}>下载映射模板(CSV)</Button>
+            <Button onClick={downloadMappingTemplateXlsx}>下载映射模板(XLSX)</Button>
+            <Button onClick={() => setOpenBulk(true)}>批量导入</Button>
+            <Button type="primary" onClick={() => router.push("/channel-game-map/new")}>
+              新增映射
+            </Button>
+          </Space>
+        }
       >
-        <Space direction="vertical" style={{ width: "100%" }}>
-          <Input.TextArea
-            rows={8}
-            value={bulkText}
-            onChange={(e) => setBulkText(e.target.value)}
-            placeholder={"支持格式（每行一组）：\n4399,雷鸣三国\n百度,浮光幻想\n也支持从 Excel 两列复制（Tab 分隔）"}
-          />
-          <Button onClick={parseBulk}>解析</Button>
-          <Table
-            rowKey="key"
-            size="small"
-            pagination={{ pageSize: 8 }}
-            dataSource={bulkPreview}
-            columns={[
-              { title: "渠道", dataIndex: "channel_name" },
-              { title: "游戏", dataIndex: "game_name" },
-              {
-                title: "状态",
-                dataIndex: "status",
-                render: (v: string) => <Tag color={v === "可新增" ? "green" : "red"}>{v}</Tag>,
+        <Table
+          rowKey="id"
+          dataSource={filtered}
+          pagination={{ pageSize: 10 }}
+          columns={[
+            { title: "ID", dataIndex: "id", width: 90 },
+            { title: "渠道", dataIndex: "channel" },
+            { title: "游戏", dataIndex: "game" },
+            { title: "渠道分成", dataIndex: "revenue_share_ratio", render: (v: number) => `${toPercent(v)}%` },
+            {
+              title: "研发分成",
+              render: (_, r) => {
+                const g = games.find((x) => x.name === r.game);
+                const fromGame = g && typeof g.rd_share_percent === "number";
+                const rdRatio = fromGame ? toRatio(g.rd_share_percent as number) : r.rd_settlement_ratio;
+                return (
+                  <Space size={6}>
+                    <span>{`${toPercent(rdRatio)}%`}</span>
+                    {fromGame ? <Tag color="blue">来自游戏</Tag> : null}
+                  </Space>
+                );
               },
-              { title: "原因", dataIndex: "reason", render: (v: string) => v || "-" },
-            ]}
-          />
-        </Space>
-      </Modal>
+            },
+            {
+              title: "发行分成",
+              render: (_, r) => {
+                const g = games.find((x) => x.name === r.game);
+                const rdRatio = g && typeof g.rd_share_percent === "number" ? toRatio(g.rd_share_percent) : r.rd_settlement_ratio;
+                return `${toPercent(calcPublishRatio(r.revenue_share_ratio, rdRatio))}%`;
+              },
+            },
+            {
+              title: "合计",
+              render: (_, r) => {
+                const g = games.find((x) => x.name === r.game);
+                const rdRatio = g && typeof g.rd_share_percent === "number" ? toRatio(g.rd_share_percent) : r.rd_settlement_ratio;
+                const publishRatio = calcPublishRatio(r.revenue_share_ratio, rdRatio);
+                return `${toPercent(r.revenue_share_ratio + rdRatio + publishRatio)}%`;
+              },
+            },
+            {
+              title: "校验状态",
+              render: (_, r) => {
+                const g = games.find((x) => x.name === r.game);
+                const rdRatio = g && typeof g.rd_share_percent === "number" ? toRatio(g.rd_share_percent) : r.rd_settlement_ratio;
+                const publishRatio = calcPublishRatio(r.revenue_share_ratio, rdRatio);
+                const ok = isTotalValid(r.revenue_share_ratio, rdRatio, publishRatio);
+                return <Tag color={ok ? "green" : "red"}>{ok ? "正常" : "异常"}</Tag>;
+              },
+            },
+            {
+              title: "操作",
+              render: (_, r) => (
+                <Space>
+                  <Button size="small" onClick={() => router.push(`/channel-game-map/${r.id}/edit`)}>
+                    编辑
+                  </Button>
+                  <Button size="small" danger onClick={() => remove(r.id)}>
+                    删除
+                  </Button>
+                </Space>
+              ),
+            },
+          ]}
+        />
+        <Modal
+          open={openBulk}
+          title="批量添加渠道游戏映射"
+          onCancel={() => setOpenBulk(false)}
+          onOk={submitBulk}
+          okText="确认导入"
+          confirmLoading={bulkLoading}
+          width={860}
+        >
+          <Space direction="vertical" style={{ width: "100%" }}>
+            <Input.TextArea
+              rows={8}
+              value={bulkText}
+              onChange={(e) => setBulkText(e.target.value)}
+              placeholder={"支持格式（每行一组）：\n4399,雷鸣三国\n百度,浮光幻想\n也支持从 Excel 两列复制（Tab 分隔）"}
+            />
+            <Button onClick={parseBulk}>解析</Button>
+            <Table
+              rowKey="key"
+              size="small"
+              pagination={{ pageSize: 8 }}
+              dataSource={bulkPreview}
+              columns={[
+                { title: "渠道", dataIndex: "channel_name" },
+                { title: "游戏", dataIndex: "game_name" },
+                {
+                  title: "状态",
+                  dataIndex: "status",
+                  render: (v: string) => <Tag color={v === "可新增" ? "green" : "red"}>{v}</Tag>,
+                },
+                { title: "原因", dataIndex: "reason", render: (v: string) => v || "-" },
+              ]}
+            />
+          </Space>
+        </Modal>
       </Card>
     </RoleGuard>
   );
