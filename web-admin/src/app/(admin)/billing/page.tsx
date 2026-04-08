@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button, Card, Descriptions, Drawer, Empty, Input, Modal, Select, Space, Switch, Table, Tag, Tooltip, message } from "antd";
 import { apiRequest } from "@/lib/api";
+import { hasRole } from "@/lib/rbac";
 import { BillingRule, calcTrialResult, matchRuleForBill } from "@/lib/billingTrial";
 import { buildExportFilename, exportRowsToCsv, exportRowsToXlsx } from "@/lib/export";
 
@@ -28,6 +29,14 @@ type BillRow = {
   rd_share?: number;
   settlement_amount?: number;
   profit?: number;
+};
+
+type CleanupDuplicatesResp = {
+  dry_run?: boolean;
+  deleted_count?: number;
+  skipped_count?: number;
+  duplicate_group_count?: number;
+  kept_group_count?: number;
 };
 
 type BillDetail = BillRow & {
@@ -216,6 +225,28 @@ export default function BillingPage() {
     message.info("请在回款页面逐条登记回款，登记后账单会自动变为已回款/部分回款");
   };
 
+  const cleanupDuplicateDraftBills = () => {
+    Modal.confirm({
+      title: "清理重复草稿账单",
+      content: "将删除重复的草稿账单，且仅删除未回款、未开票、无依赖的重复项，是否继续？",
+      okText: "确认清理",
+      okType: "danger",
+      cancelText: "取消",
+      onOk: async () => {
+        try {
+          const data = await apiRequest<CleanupDuplicatesResp>("/billing/cleanup-duplicates", "POST", { dry_run: false });
+          const deleted = data.deleted_count ?? 0;
+          const skipped = data.skipped_count ?? 0;
+          message.success(`清理完成：已删除 ${deleted} 条，跳过 ${skipped} 条`);
+          await loadBills();
+        } catch (e) {
+          message.error((e as Error).message || "清理失败");
+          throw e;
+        }
+      },
+    });
+  };
+
   useEffect(() => {
     const billId = Number(searchParams.get("bill_id") || 0);
     loadBills({ period, billIdToOpen: billId > 0 ? billId : null });
@@ -274,6 +305,11 @@ export default function BillingPage() {
               ]}
             />
             <Button onClick={exportBills}>导出账单</Button>
+            {hasRole(["admin"]) && (
+              <Button danger onClick={cleanupDuplicateDraftBills}>
+                清理重复草稿账单
+              </Button>
+            )}
             <Tooltip title="后端暂无批量直接置已回款接口，需先登记回款；这里支持批量跳转。">
               <Button onClick={gotoBatchReceipt}>批量标记已回款</Button>
             </Tooltip>
