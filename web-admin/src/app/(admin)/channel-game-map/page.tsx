@@ -199,6 +199,14 @@ export default function ChannelGameMapPage() {
   }, []);
 
   useEffect(() => {
+    if (searchParams.get("add") === "1") return;
+    const chName = (searchParams.get("channel") || "").trim();
+    const gmName = (searchParams.get("game") || "").trim();
+    if (chName) setQChannel(chName);
+    if (gmName) setQGame(gmName);
+  }, [searchParams]);
+
+  useEffect(() => {
     if (searchParams.get("add") !== "1") return;
     if (!channels.length || !games.length) return;
     const chName = (searchParams.get("channel") || "").trim();

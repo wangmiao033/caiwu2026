@@ -367,7 +367,10 @@ export default function BillingRulesPage() {
     message.success("导出成功");
   };
 
-  const fromExceptionJump = Boolean(searchParams.get("channel")?.trim() || searchParams.get("game")?.trim());
+  const qpCh = (searchParams.get("channel") || "").trim();
+  const qpGm = (searchParams.get("game") || "").trim();
+  const fromExceptionJump = Boolean(qpCh || qpGm);
+  const fromImportPrecheckPair = Boolean(qpCh && qpGm);
 
   return (
     <RoleGuard allow={["admin", "finance_manager"]}>
@@ -408,8 +411,16 @@ export default function BillingRulesPage() {
           type="info"
           showIcon
           style={{ marginBottom: 16 }}
-          message="处理分成异常时请先核对主数据与映射"
-          description="研发分成以「游戏管理」中的研发分成(%)为准；渠道侧分成请在「渠道-游戏映射」中维护。本页规则中的研发分成仅展示游戏主数据，不可在此修改。"
+          message={
+            fromImportPrecheckPair
+              ? "导入预检：研发分成来自游戏主数据，请勿在本页修改研发分成"
+              : "处理分成异常时请先核对主数据与映射"
+          }
+          description={
+            fromImportPrecheckPair
+              ? "请在下方表格中定位该渠道与游戏，补齐通道费、税点、私点等计费字段并保存。研发分成请前往「游戏管理」维护。"
+              : "研发分成以「游戏管理」中的研发分成(%)为准；渠道侧分成请在「渠道-游戏映射」中维护。本页规则中的研发分成仅展示游戏主数据，不可在此修改。"
+          }
         />
       ) : null}
       <Table

@@ -49,11 +49,17 @@ type OptionItem = {
   name: string;
 };
 
+type GameOption = OptionItem & { rd_share_percent?: number | null };
+
 type MappingItem = {
   id: number;
   channel: string;
   game: string;
+  revenue_share_ratio: number;
+  rd_settlement_ratio: number;
 };
+
+type BillingRuleApiRow = { id?: number; name: string; active?: boolean; default_ratio?: number | null };
 
 type ManualRow = {
   key: number;
@@ -124,9 +130,18 @@ type ExtractRow = {
   variant_match_status?: "已匹配版本" | "未匹配版本";
 };
 
-type PrecheckKind = "normal" | "unmatched_channel" | "unmatched_game" | "unmapped_pair" | "unmatched_variant" | "invalid_row";
+type PrecheckKind =
+  | "normal"
+  | "unmatched_channel"
+  | "unmatched_game"
+  | "unmapped_pair"
+  | "unmatched_variant"
+  | "invalid_row"
+  | "missing_rd_share"
+  | "missing_channel_map_share"
+  | "missing_rule_config";
 
-type PreviewRowPrecheck = PreviewRow & { precheck: PrecheckKind };
+type PreviewRowPrecheck = PreviewRow & { precheck: PrecheckKind; precheckReason?: string };
 
 const PRECHECK_LABEL: Record<PrecheckKind, string> = {
   normal: "正常",
@@ -135,13 +150,170 @@ const PRECHECK_LABEL: Record<PrecheckKind, string> = {
   unmapped_pair: "未映射组合",
   unmatched_variant: "未匹配版本",
   invalid_row: "数据不完整",
+  missing_rd_share: "缺研发分成",
+  missing_channel_map_share: "缺渠道映射分成",
+  missing_rule_config: "缺规则配置",
 };
+
+function isValidRdSharePercent(v: unknown): boolean {
+  if (v === null || v === undefined || v === "") return false;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return false;
+  if (n < 0 || n > 100) return false;
+  return true;
+}
+
+function isValidChannelShareRatio(v: unknown): boolean {
+  if (v === null || v === undefined || v === "") return false;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return false;
+  if (n < 0 || n > 1) return false;
+  return true;
+}
+
+const LOCAL_RULE_DISCOUNT = new Set(["无", "0.1折", "0.05折"]);
+
+function isLocalRuleConfigComplete(r: { discountType?: string; channelFee?: unknown; taxRate?: unknown; privateRate?: unknown }): boolean {
+  if (!r.discountType || !LOCAL_RULE_DISCOUNT.has(r.discountType)) return false;
+  const cf = Number(r.channelFee);
+  const tr = Number(r.taxRate);
+  const pr = Number(r.privateRate);
+  if (!Number.isFinite(cf) || !Number.isFinite(tr) || !Number.isFinite(pr)) return false;
+  if (cf < 0 || cf > 1 || tr < 0 || tr > 1 || pr < 0 || pr > 1) return false;
+  return true;
+}
+
+function ruleConfigurationOk(
+  ch: string,
+  gm: string,
+  apiRules: BillingRuleApiRow[],
+  localRulesRaw: string | null
+): { ok: boolean; reason: string } {
+  const expectedName = `${ch}-${gm}-rule`;
+  const apiOk = apiRules.some((r) => String(r.name || "") === expectedName && r.active !== false);
+
+  let localRows: Array<{ channel?: string; game?: string; discountType?: string; channelFee?: unknown; taxRate?: unknown; privateRate?: unknown }> | null =
+    null;
+  if (localRulesRaw) {
+    try {
+      const parsed = JSON.parse(localRulesRaw) as unknown;
+      if (Array.isArray(parsed)) localRows = parsed;
+    } catch {
+      localRows = null;
+    }
+  }
+
+  if (Array.isArray(localRows) && localRows.length > 0) {
+    const localRow = localRows.find((r) => r.channel === ch && r.game === gm);
+    if (localRow) {
+      return isLocalRuleConfigComplete(localRow)
+        ? { ok: true, reason: "" }
+        : {
+            ok: false,
+            reason: "规则配置中折扣类型、通道费、税点或私点等字段不完整或非法，请在规则配置中编辑保存",
+          };
+    }
+    return apiOk
+      ? { ok: true, reason: "" }
+      : { ok: false, reason: "未在规则配置中找到该渠道-游戏组合，请新增并保存规则" };
+  }
+
+  return apiOk
+    ? { ok: true, reason: "" }
+    : { ok: false, reason: "未登记计费规则或本地规则未生成，请先在规则配置中保存对应规则" };
+}
 
 function buildMapQuickHref(channel: string, game: string) {
   const qs = new URLSearchParams({ add: "1", return: "import" });
   if (channel) qs.set("channel", channel);
   if (game) qs.set("game", game);
   return `/channel-game-map?${qs.toString()}`;
+}
+
+function buildChannelsQuickHref(channel: string) {
+  const qs = new URLSearchParams();
+  if (channel) qs.set("channel", channel);
+  return qs.toString() ? `/channels?${qs.toString()}` : "/channels";
+}
+
+function buildGamesQuickHref(game: string) {
+  const qs = new URLSearchParams();
+  if (game) qs.set("game", game);
+  return qs.toString() ? `/games?${qs.toString()}` : "/games";
+}
+
+function buildMapFilterHref(channel: string, game: string) {
+  const qs = new URLSearchParams();
+  if (channel) qs.set("channel", channel);
+  if (game) qs.set("game", game);
+  return `/channel-game-map?${qs.toString()}`;
+}
+
+function buildBillingRulesQuickHref(channel: string, game: string) {
+  const qs = new URLSearchParams();
+  if (channel) qs.set("channel", channel);
+  if (game) qs.set("game", game);
+  return `/billing-rules?${qs.toString()}`;
+}
+
+const PRECHECK_PANEL_ORDER: PrecheckKind[] = [
+  "invalid_row",
+  "unmatched_channel",
+  "unmatched_game",
+  "unmapped_pair",
+  "missing_rd_share",
+  "missing_channel_map_share",
+  "missing_rule_config",
+  "unmatched_variant",
+  "normal",
+];
+
+function renderPrecheckQuickAction(kind: PrecheckKind, row: PreviewRowPrecheck, push: (url: string) => void) {
+  const ch = String(row.channel_name || "");
+  const gm = String(row.game_name || "");
+  if (kind === "unmatched_channel") {
+    return (
+      <Button type="link" size="small" onClick={() => push(buildChannelsQuickHref(ch))}>
+        去渠道管理
+      </Button>
+    );
+  }
+  if (kind === "unmatched_game" || kind === "missing_rd_share") {
+    return (
+      <Button type="link" size="small" onClick={() => push(buildGamesQuickHref(gm))}>
+        去游戏管理
+      </Button>
+    );
+  }
+  if (kind === "unmapped_pair") {
+    return (
+      <Button type="link" size="small" onClick={() => push(buildMapQuickHref(ch, gm))}>
+        去渠道-游戏映射（新增）
+      </Button>
+    );
+  }
+  if (kind === "missing_channel_map_share") {
+    return (
+      <Button type="link" size="small" onClick={() => push(buildMapFilterHref(ch, gm))}>
+        去渠道-游戏映射（编辑）
+      </Button>
+    );
+  }
+  if (kind === "missing_rule_config") {
+    return (
+      <Button type="link" size="small" onClick={() => push(buildBillingRulesQuickHref(ch, gm))}>
+        去规则配置
+      </Button>
+    );
+  }
+  if (kind === "unmatched_variant") {
+    return (
+      <Button type="link" size="small" onClick={() => push(`/game-variants?keyword=${encodeURIComponent(gm)}`)}>
+        去版本管理
+      </Button>
+    );
+  }
+  return <span>—</span>;
 }
 
 export default function ImportPage() {
@@ -154,8 +326,9 @@ export default function ImportPage() {
   const [preview, setPreview] = useState<PreviewRow[]>([]);
   const [result, setResult] = useState<Record<string, unknown> | null>(null);
   const [channels, setChannels] = useState<OptionItem[]>([]);
-  const [games, setGames] = useState<OptionItem[]>([]);
+  const [games, setGames] = useState<GameOption[]>([]);
   const [maps, setMaps] = useState<MappingItem[]>([]);
+  const [billingApiRules, setBillingApiRules] = useState<BillingRuleApiRow[]>([]);
   const [manualRows, setManualRows] = useState<ManualRow[]>([{ key: 1 }]);
   const [history, setHistory] = useState<ImportHistoryRow[]>([]);
   const [historyTotal, setHistoryTotal] = useState(0);
@@ -234,12 +407,25 @@ export default function ImportPage() {
     apiRequest<OptionItem[]>("/channels")
       .then(setChannels)
       .catch(() => {});
-    apiRequest<OptionItem[]>("/games")
+    apiRequest<GameOption[]>("/games")
       .then(setGames)
       .catch(() => {});
-    apiRequest<{ channel: string; game: string }[]>("/channel-game-map")
-      .then((data) => setMaps(data.map((x, idx) => ({ id: idx + 1, channel: x.channel, game: x.game }))))
+    apiRequest<MappingItem[]>("/channel-game-map")
+      .then((data) =>
+        setMaps(
+          (data || []).map((x) => ({
+            id: x.id,
+            channel: x.channel,
+            game: x.game,
+            revenue_share_ratio: Number(x.revenue_share_ratio),
+            rd_settlement_ratio: Number(x.rd_settlement_ratio),
+          }))
+        )
+      )
       .catch(() => {});
+    apiRequest<BillingRuleApiRow[]>("/billing/rules")
+      .then((rows) => setBillingApiRules(Array.isArray(rows) ? rows : []))
+      .catch(() => setBillingApiRules([]));
   }, []);
 
   useEffect(() => {
@@ -279,6 +465,10 @@ export default function ImportPage() {
     const channelSet = new Set(channels.map((c) => c.name));
     const gameSet = new Set(games.map((g) => g.name));
     const mapSet = new Set(maps.map((m) => `${m.channel}::${m.game}`));
+    const mapByPair = new Map(maps.map((m) => [`${m.channel}::${m.game}`, m] as const));
+    const gameByName = new Map(games.map((g) => [g.name, g] as const));
+    const localRulesRaw = typeof window !== "undefined" ? localStorage.getItem("billing_rules_local") : null;
+
     const counts: Record<PrecheckKind, number> = {
       normal: 0,
       unmatched_channel: 0,
@@ -286,41 +476,81 @@ export default function ImportPage() {
       unmapped_pair: 0,
       unmatched_variant: 0,
       invalid_row: 0,
+      missing_rd_share: 0,
+      missing_channel_map_share: 0,
+      missing_rule_config: 0,
     };
+
     const rowsWithPrecheck: PreviewRowPrecheck[] = preview.map((row) => {
       const ch = String(row.channel_name || "").trim();
       const gm = String(row.game_name || "").trim();
       const amt = row.gross_amount;
       const amtOk = amt !== undefined && amt !== null && String(amt).trim() !== "";
       let precheck: PrecheckKind;
+      let precheckReason: string | undefined;
+
       if (!ch || !gm || !amtOk || row.status === "异常") {
         precheck = "invalid_row";
+        precheckReason = "渠道名、游戏名或流水缺失/异常";
       } else if (!channelSet.has(ch)) {
         precheck = "unmatched_channel";
+        precheckReason = "流水中的渠道在「渠道管理」中不存在，请新增或修正名称";
       } else if (!gameSet.has(gm)) {
         precheck = "unmatched_game";
+        precheckReason = "流水中的游戏在「游戏管理」中不存在，请新增或修正名称";
       } else if (!mapSet.has(`${ch}::${gm}`)) {
         precheck = "unmapped_pair";
-      } else if (row.variant_match_status === "未匹配版本") {
-        precheck = "unmatched_variant";
+        precheckReason = "渠道与游戏尚未在「渠道-游戏映射」中关联";
       } else {
-        precheck = "normal";
+        const gameRow = gameByName.get(gm);
+        const mapRow = mapByPair.get(`${ch}::${gm}`);
+        const rdOk = isValidRdSharePercent(gameRow?.rd_share_percent);
+        const chShareOk = mapRow ? isValidChannelShareRatio(mapRow.revenue_share_ratio) : false;
+        const ruleRes = ruleConfigurationOk(ch, gm, billingApiRules, localRulesRaw);
+
+        if (!rdOk) {
+          precheck = "missing_rd_share";
+          precheckReason = "游戏主数据中研发分成（%）缺失、为空或不合法（0–100），请在游戏管理中补全";
+        } else if (!chShareOk) {
+          precheck = "missing_channel_map_share";
+          precheckReason = "渠道-游戏映射中渠道分成比例缺失或非法（应为 0–100% 对应的小数比例），请在映射中补渠道分成";
+        } else if (!ruleRes.ok) {
+          precheck = "missing_rule_config";
+          precheckReason = ruleRes.reason;
+        } else if (row.variant_match_status === "未匹配版本") {
+          precheck = "unmatched_variant";
+          precheckReason = "未匹配到游戏版本，可在导入后于版本管理中处理（不阻断导入）";
+        } else {
+          precheck = "normal";
+        }
       }
+
       counts[precheck] += 1;
-      return { ...row, precheck };
+      return { ...row, precheck, precheckReason };
     });
+
     const blocked =
-      counts.unmatched_channel > 0 || counts.unmatched_game > 0 || counts.unmapped_pair > 0 || counts.invalid_row > 0;
+      counts.unmatched_channel > 0 ||
+      counts.unmatched_game > 0 ||
+      counts.unmapped_pair > 0 ||
+      counts.invalid_row > 0 ||
+      counts.missing_rd_share > 0 ||
+      counts.missing_channel_map_share > 0 ||
+      counts.missing_rule_config > 0;
+
     const grouped = {
+      invalid_row: rowsWithPrecheck.filter((r) => r.precheck === "invalid_row"),
       unmatched_channel: rowsWithPrecheck.filter((r) => r.precheck === "unmatched_channel"),
       unmatched_game: rowsWithPrecheck.filter((r) => r.precheck === "unmatched_game"),
       unmapped_pair: rowsWithPrecheck.filter((r) => r.precheck === "unmapped_pair"),
+      missing_rd_share: rowsWithPrecheck.filter((r) => r.precheck === "missing_rd_share"),
+      missing_channel_map_share: rowsWithPrecheck.filter((r) => r.precheck === "missing_channel_map_share"),
+      missing_rule_config: rowsWithPrecheck.filter((r) => r.precheck === "missing_rule_config"),
       unmatched_variant: rowsWithPrecheck.filter((r) => r.precheck === "unmatched_variant"),
       normal: rowsWithPrecheck.filter((r) => r.precheck === "normal"),
-      invalid_row: rowsWithPrecheck.filter((r) => r.precheck === "invalid_row"),
     };
     return { rowsWithPrecheck, counts, grouped, blocked };
-  }, [preview, channels, games, maps]);
+  }, [preview, channels, games, maps, billingApiRules]);
 
   const parseFile = async (f: File) => {
     const buf = await f.arrayBuffer();
@@ -590,7 +820,9 @@ export default function ImportPage() {
       return;
     }
     if (templatePrecheck.blocked) {
-      message.error("导入前预检未通过：请先处理未匹配渠道、未匹配游戏、未映射组合或数据不完整等问题后再导入");
+      message.error(
+        "导入前预检未通过：请处理未匹配渠道/游戏、未映射组合、数据不完整、缺研发分成、缺渠道映射分成或缺规则配置等问题后再导入"
+      );
       return;
     }
     console.debug("[import/template] upload clicked", { selectedFileName: selectedFile.name, size: selectedFile.size });
@@ -875,66 +1107,70 @@ export default function ImportPage() {
                   </Space>
                   {preview.length > 0 ? (
                     <Card size="small" title="导入前预检" style={{ marginTop: 8 }}>
+                      <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
+                        模板仅用于导入「流水」三列数据，不在模板里维护分成。研发分成、渠道映射分成与计费规则均由系统主数据、渠道-游戏映射与规则配置维护。若预检报错，请到对应页面补全配置，而不是改模板列结构。
+                        <br />
+                        常见对应：未匹配渠道 → 渠道管理；未匹配游戏 / 缺研发分成 → 游戏管理；未映射组合 / 缺渠道映射分成 → 渠道-游戏映射；分成或规则不完整 → 游戏管理 / 渠道-游戏映射 / 规则配置。
+                      </Typography.Paragraph>
                       <Space wrap style={{ marginBottom: 12 }}>
                         <Statistic title={PRECHECK_LABEL.normal} value={templatePrecheck.counts.normal} />
                         <Statistic title={PRECHECK_LABEL.invalid_row} value={templatePrecheck.counts.invalid_row} valueStyle={{ color: "#cf1322" }} />
                         <Statistic title={PRECHECK_LABEL.unmatched_channel} value={templatePrecheck.counts.unmatched_channel} valueStyle={{ color: "#cf1322" }} />
                         <Statistic title={PRECHECK_LABEL.unmatched_game} value={templatePrecheck.counts.unmatched_game} valueStyle={{ color: "#cf1322" }} />
                         <Statistic title={PRECHECK_LABEL.unmapped_pair} value={templatePrecheck.counts.unmapped_pair} valueStyle={{ color: "#fa8c16" }} />
+                        <Statistic title={PRECHECK_LABEL.missing_rd_share} value={templatePrecheck.counts.missing_rd_share} valueStyle={{ color: "#cf1322" }} />
+                        <Statistic
+                          title={PRECHECK_LABEL.missing_channel_map_share}
+                          value={templatePrecheck.counts.missing_channel_map_share}
+                          valueStyle={{ color: "#cf1322" }}
+                        />
+                        <Statistic
+                          title={PRECHECK_LABEL.missing_rule_config}
+                          value={templatePrecheck.counts.missing_rule_config}
+                          valueStyle={{ color: "#cf1322" }}
+                        />
                         <Statistic title={PRECHECK_LABEL.unmatched_variant} value={templatePrecheck.counts.unmatched_variant} valueStyle={{ color: "#faad14" }} />
                       </Space>
                       <Tag color={templatePrecheck.blocked ? "red" : "green"} style={{ marginBottom: 8 }}>
                         {templatePrecheck.blocked
-                          ? "存在阻断项：未匹配渠道 / 未匹配游戏 / 未映射组合 / 数据不完整，无法导入"
+                          ? "存在阻断项：主数据/映射/规则未就绪或数据不完整时无法导入；未匹配版本不阻断"
                           : "预检通过（未匹配版本不阻断，可在导入后处理）"}
                       </Tag>
                       <Collapse
                         size="small"
-                        items={(
-                          [
-                            "invalid_row",
-                            "unmatched_channel",
-                            "unmatched_game",
-                            "unmapped_pair",
-                            "unmatched_variant",
-                            "normal",
-                          ] as PrecheckKind[]
-                        )
-                          .filter((k) => (templatePrecheck.grouped as Record<string, PreviewRowPrecheck[]>)[k]?.length > 0)
-                          .map((kind) => ({
-                            key: kind,
-                            label: `${PRECHECK_LABEL[kind]}（${templatePrecheck.counts[kind]} 条）`,
-                            children: (
-                              <Table
-                                size="small"
-                                rowKey="key"
-                                dataSource={templatePrecheck.grouped[kind as keyof typeof templatePrecheck.grouped]}
-                                pagination={{ pageSize: 5 }}
-                                columns={[
-                                  { title: "渠道", dataIndex: "channel_name" },
-                                  { title: "游戏", dataIndex: "game_name" },
-                                  { title: "流水", dataIndex: "gross_amount" },
-                                  ...(kind === "unmapped_pair"
-                                    ? [
-                                        {
-                                          title: "快捷处理",
-                                          width: 140,
-                                          render: (_: unknown, r: PreviewRowPrecheck) => (
-                                            <Button
-                                              type="link"
-                                              size="small"
-                                              onClick={() => router.push(buildMapQuickHref(r.channel_name, r.game_name))}
-                                            >
-                                              去渠道-游戏映射
-                                            </Button>
-                                          ),
-                                        },
-                                      ]
-                                    : []),
-                                ]}
-                              />
-                            ),
-                          }))}
+                        items={PRECHECK_PANEL_ORDER.filter(
+                          (k) => (templatePrecheck.grouped as Record<string, PreviewRowPrecheck[]>)[k]?.length > 0
+                        ).map((kind) => ({
+                          key: kind,
+                          label: `${PRECHECK_LABEL[kind]}（${templatePrecheck.counts[kind]} 条）`,
+                          children: (
+                            <Table
+                              size="small"
+                              rowKey="key"
+                              dataSource={templatePrecheck.grouped[kind as keyof typeof templatePrecheck.grouped]}
+                              pagination={{ pageSize: 5 }}
+                              columns={[
+                                { title: "渠道", dataIndex: "channel_name" },
+                                { title: "游戏", dataIndex: "game_name" },
+                                { title: "流水", dataIndex: "gross_amount" },
+                                ...(kind !== "normal"
+                                  ? [
+                                      {
+                                        title: "问题说明",
+                                        ellipsis: true,
+                                        render: (_: unknown, r: PreviewRowPrecheck) => r.precheckReason || "—",
+                                      },
+                                      {
+                                        title: "快捷处理",
+                                        width: 200,
+                                        render: (_: unknown, r: PreviewRowPrecheck) => renderPrecheckQuickAction(kind, r, router.push),
+                                      },
+                                    ]
+                                  : []),
+                              ]}
+                            />
+                          ),
+                        }))}
                       />
                     </Card>
                   ) : null}

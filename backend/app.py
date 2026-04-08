@@ -1910,7 +1910,16 @@ def list_rules(
         rows = [x for x in rows if channel in x.name]
     if game:
         rows = [x for x in rows if game in x.name]
-    return rows
+    return [
+        {
+            "id": x.id,
+            "name": x.name,
+            "bill_type": x.bill_type.value if isinstance(x.bill_type, BillType) else str(x.bill_type),
+            "default_ratio": float(x.default_ratio) if x.default_ratio is not None else None,
+            "active": x.active,
+        }
+        for x in rows
+    ]
 
 
 @app.put("/billing/rules/{rule_id}")

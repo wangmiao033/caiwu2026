@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { Button, Card, Form, Input, Modal, Space, Table, Tag, message } from "antd";
 import { apiRequest } from "@/lib/api";
 import { buildExportFilename, exportRowsToXlsx } from "@/lib/export";
@@ -9,6 +10,7 @@ type Row = { id: number; name: string };
 type BulkPreviewRow = { key: string; name: string; status: "可新增" | "已存在" | "重复输入" };
 
 export default function ChannelsPage() {
+  const searchParams = useSearchParams();
   const [rows, setRows] = useState<Row[]>([]);
   const [keyword, setKeyword] = useState("");
   const [open, setOpen] = useState(false);
@@ -107,6 +109,11 @@ export default function ChannelsPage() {
   useEffect(() => {
     load();
   }, []);
+
+  useEffect(() => {
+    const ch = (searchParams.get("channel") || searchParams.get("keyword") || "").trim();
+    if (ch) setKeyword(ch);
+  }, [searchParams]);
 
   return (
     <Card
