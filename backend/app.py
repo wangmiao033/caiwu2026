@@ -17,6 +17,8 @@ from urllib.parse import urlparse
 import pandas as pd
 import jwt
 from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Font
+from openpyxl.utils import get_column_letter
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -423,6 +425,8 @@ class ChannelSettlementStatement(Base):
     # Phase 1 固定 generated；保留字段便于后续扩展多状态
     status: Mapped[str] = mapped_column(String(20), default="generated", index=True)
     note: Mapped[str] = mapped_column(String(500), default="")
+    party_platform_name: Mapped[str] = mapped_column(String(200), default="广州熊动科技有限公司")
+    party_channel_name: Mapped[str] = mapped_column(String(200), default="")
     created_by: Mapped[str] = mapped_column(String(50), default="system")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now(), index=True)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now(), index=True)
@@ -438,7 +442,10 @@ class ChannelSettlementStatementItem(Base):
     game_name_snapshot: Mapped[str] = mapped_column(String(150), default="")
     gross_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
     discount_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    test_fee_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    coupon_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
     settlement_base_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    share_ratio: Mapped[Decimal] = mapped_column(Numeric(8, 4), default=Decimal("0"))
     channel_fee_rate: Mapped[Decimal] = mapped_column(Numeric(8, 4), default=Decimal("0"))
     channel_fee_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
     settlement_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
@@ -744,6 +751,11 @@ class AdminResetPasswordIn(BaseModel):
 class SettlementStatementGenerateIn(BaseModel):
     period: str
     channel_id: int
+    overwrite: bool = False
+
+
+class SettlementGenerateAllForPeriodIn(BaseModel):
+    period: str
     overwrite: bool = False
 
 
@@ -1229,6 +1241,42 @@ def ensure_contract_tables():
     ensure_contract_lifecycle_status_migration()
 
 
+def ensure_settlement_statement_v2_columns():
+    """渠道月结单：甲方/乙方快照；行级测试费/代金券/分成比例。"""
+    inspector = inspect(engine)
+    try:
+        if "channel_settlement_statements" in inspector.get_table_names():
+            existing_h = {c["name"] for c in inspector.get_columns("channel_settlement_statements")}
+            stmts_h: list[str] = []
+            if "party_platform_name" not in existing_h:
+                stmts_h.append(
+                    "ALTER TABLE channel_settlement_statements ADD COLUMN party_platform_name VARCHAR(200) DEFAULT '广州熊动科技有限公司'"
+                )
+            if "party_channel_name" not in existing_h:
+                stmts_h.append("ALTER TABLE channel_settlement_statements ADD COLUMN party_channel_name VARCHAR(200) DEFAULT ''")
+            if stmts_h:
+                with engine.begin() as conn:
+                    for s in stmts_h:
+                        conn.execute(text(s))
+        if "channel_settlement_statement_items" in inspector.get_table_names():
+            existing_i = {c["name"] for c in inspector.get_columns("channel_settlement_statement_items")}
+            stmts_i: list[str] = []
+            if "test_fee_amount" not in existing_i:
+                stmts_i.append(
+                    "ALTER TABLE channel_settlement_statement_items ADD COLUMN test_fee_amount NUMERIC(18,2) DEFAULT 0"
+                )
+            if "coupon_amount" not in existing_i:
+                stmts_i.append("ALTER TABLE channel_settlement_statement_items ADD COLUMN coupon_amount NUMERIC(18,2) DEFAULT 0")
+            if "share_ratio" not in existing_i:
+                stmts_i.append("ALTER TABLE channel_settlement_statement_items ADD COLUMN share_ratio NUMERIC(8,4) DEFAULT 0")
+            if stmts_i:
+                with engine.begin() as conn:
+                    for s in stmts_i:
+                        conn.execute(text(s))
+    except Exception:
+        pass
+
+
 app = FastAPI(title="内部对账系统", version="1.0.0")
 
 # 浏览器直连后端（如合同 PDF 识别）需跨域；默认 * + 无 credentials，与 Bearer 头兼容。生产可用 CORS_ALLOW_ORIGINS 收紧。
@@ -1252,6 +1300,7 @@ def startup():
     ensure_bill_lifecycle_status_column()
     ensure_import_enrichment_columns()
     ensure_contract_tables()
+    ensure_settlement_statement_v2_columns()
     with SessionLocal() as db:
         create_default_data(db)
 
@@ -3269,15 +3318,41 @@ def _normalize_period_yyyymm(period: str) -> str:
     return f"{y}-{mo:02d}"
 
 
-def _build_settlement_snapshot(db: Session, period: str, channel_id: int) -> tuple[Channel, dict[int, dict], Decimal, Decimal, Decimal, Decimal, Decimal]:
-    _ensure_period_format(period)
+def _resolve_parties_for_channel(db: Session, channel: Channel) -> tuple[str, str]:
+    """甲方（平台）/ 乙方：优先有效合同中快照，否则默认平台名与渠道名。"""
+    platform = "广州熊动科技有限公司"
+    partner = (channel.name or "").strip() or "——"
+    row = db.scalar(
+        select(ContractHeader)
+        .where(ContractHeader.channel_name == channel.name, ContractHeader.status == ContractStatus.active)
+        .order_by(ContractHeader.end_date.desc())
+        .limit(1)
+    )
+    if row:
+        if (row.platform_party_name or "").strip():
+            platform = row.platform_party_name.strip()
+        if (row.developer_party_name or "").strip():
+            partner = row.developer_party_name.strip()
+    return platform, partner
+
+
+def _build_settlement_snapshot(db: Session, period: str, channel_id: int) -> tuple[Channel, dict[int, dict], Decimal, Decimal, Decimal, Decimal, Decimal, str, str]:
+    """基于该账期唯一有效已确认导入批次，按渠道聚合渠道+游戏行并计算结算列。"""
+    period = _normalize_period_yyyymm(period)
     channel = db.get(Channel, channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="渠道不存在")
-    recon_tasks = db.scalars(select(ReconTask).where(ReconTask.period == period, ReconTask.status == ReconStatus.confirmed)).all()
-    if not recon_tasks:
-        raise HTTPException(status_code=400, detail="该账期无已确认核对任务")
-    task_ids = [x.id for x in recon_tasks]
+    task_ids = _active_confirmed_recon_task_ids_for_billing(db, period)
+    if len(task_ids) > 1:
+        raise HTTPException(status_code=400, detail=BILLING_PERIOD_MULTI_ACTIVE_CONFIRMED_IMPORTS)
+    if len(task_ids) == 0:
+        any_c = db.scalars(select(ReconTask).where(ReconTask.period == period, ReconTask.status == ReconStatus.confirmed)).all()
+        if not any_c:
+            raise HTTPException(status_code=400, detail="该账期无已确认核对任务")
+        raise HTTPException(
+            status_code=400,
+            detail="该账期无已确认且有效的导入批次（可能均已作废），请先在导入数据中心处理后再生成月结单。",
+        )
     rows = db.scalars(
         select(RawStatement).where(
             RawStatement.recon_task_id.in_(task_ids),
@@ -3300,6 +3375,7 @@ def _build_settlement_snapshot(db: Session, period: str, channel_id: int) -> tup
             continue
         game_id = link.game_id
         item = items_by_game.get(game_id)
+        rev = Decimal(str(link.revenue_share_ratio))
         if not item:
             item = {
                 "game_id": game_id,
@@ -3307,8 +3383,11 @@ def _build_settlement_snapshot(db: Session, period: str, channel_id: int) -> tup
                 "game_name_snapshot": link.game.name,
                 "gross_amount": Decimal("0"),
                 "discount_amount": Decimal("0"),
+                "test_fee_amount": Decimal("0"),
+                "coupon_amount": Decimal("0"),
                 "settlement_base_amount": Decimal("0"),
-                "channel_fee_rate": Decimal(str(link.revenue_share_ratio)),
+                "share_ratio": rev,
+                "channel_fee_rate": rev,
                 "channel_fee_amount": Decimal("0"),
                 "settlement_amount": Decimal("0"),
             }
@@ -3324,17 +3403,18 @@ def _build_settlement_snapshot(db: Session, period: str, channel_id: int) -> tup
     total_settlement_amount = Decimal("0")
     for _, item in items_by_game.items():
         item["gross_amount"] = _money2(item["gross_amount"])
-        # Phase 1：减免口径尚无稳定来源，固定 0，并保留字段快照
-        item["discount_amount"] = Decimal("0.00")
+        item["test_fee_amount"] = Decimal("0.00")
+        item["coupon_amount"] = Decimal("0.00")
+        item["discount_amount"] = _money2(item["test_fee_amount"] + item["coupon_amount"])
         item["settlement_base_amount"] = _money2(item["gross_amount"] - item["discount_amount"])
         item["channel_fee_amount"] = _money2(item["settlement_base_amount"] * item["channel_fee_rate"])
-        # 口径：对账金额 = 结算基数 - 通道费
         item["settlement_amount"] = _money2(item["settlement_base_amount"] - item["channel_fee_amount"])
         total_gross_amount += item["gross_amount"]
         total_discount_amount += item["discount_amount"]
         total_settlement_base_amount += item["settlement_base_amount"]
         total_channel_fee_amount += item["channel_fee_amount"]
         total_settlement_amount += item["settlement_amount"]
+    party_a, party_b = _resolve_parties_for_channel(db, channel)
     return (
         channel,
         items_by_game,
@@ -3343,7 +3423,23 @@ def _build_settlement_snapshot(db: Session, period: str, channel_id: int) -> tup
         _money2(total_settlement_base_amount),
         _money2(total_channel_fee_amount),
         _money2(total_settlement_amount),
+        party_a,
+        party_b,
     )
+
+
+def _settlement_channel_ids_for_period(db: Session, period: str, task_ids: list[int]) -> list[int]:
+    rows = db.scalars(
+        select(RawStatement).where(RawStatement.recon_task_id.in_(task_ids), RawStatement.period == period)
+    ).all()
+    maps = db.scalars(select(ChannelGameMap)).all()
+    map_key = {(m.channel.name, m.game.name): m for m in maps}
+    ids: set[int] = set()
+    for r in rows:
+        link = map_key.get((r.channel_name, r.game_name))
+        if link:
+            ids.add(link.channel_id)
+    return sorted(ids)
 
 
 @app.get("/settlement-statements")
@@ -3357,7 +3453,12 @@ def list_settlement_statements(
 ):
     stmt = select(ChannelSettlementStatement).order_by(ChannelSettlementStatement.id.desc())
     if period:
-        stmt = stmt.where(ChannelSettlementStatement.period == period)
+        p_filter = period.strip()
+        try:
+            p_filter = _normalize_period_yyyymm(p_filter)
+        except HTTPException:
+            pass
+        stmt = stmt.where(ChannelSettlementStatement.period == p_filter)
     if channel_id:
         stmt = stmt.where(ChannelSettlementStatement.channel_id == channel_id)
     if status:
@@ -3397,7 +3498,7 @@ def generate_settlement_statement(
     db: Session = Depends(get_db),
     ctx: dict = Depends(require_role([Role.admin, Role.finance])),
 ):
-    period = (payload.period or "").strip()
+    period = _normalize_period_yyyymm(payload.period)
     existing = db.scalar(
         select(ChannelSettlementStatement).where(
             ChannelSettlementStatement.period == period,
@@ -3414,6 +3515,8 @@ def generate_settlement_statement(
         total_settlement_base_amount,
         total_channel_fee_amount,
         total_settlement_amount,
+        party_platform_name,
+        party_channel_name,
     ) = _build_settlement_snapshot(db, period, payload.channel_id)
     now = dt.datetime.now()
     if existing:
@@ -3437,6 +3540,8 @@ def generate_settlement_statement(
     statement.total_settlement_base_amount = total_settlement_base_amount
     statement.total_channel_fee_amount = total_channel_fee_amount
     statement.total_settlement_amount = total_settlement_amount
+    statement.party_platform_name = party_platform_name
+    statement.party_channel_name = party_channel_name
     statement.status = "generated"
     statement.updated_at = now
     sort_order = 1
@@ -3449,7 +3554,10 @@ def generate_settlement_statement(
                 game_name_snapshot=item["game_name_snapshot"],
                 gross_amount=item["gross_amount"],
                 discount_amount=item["discount_amount"],
+                test_fee_amount=item["test_fee_amount"],
+                coupon_amount=item["coupon_amount"],
                 settlement_base_amount=item["settlement_base_amount"],
+                share_ratio=item["share_ratio"],
                 channel_fee_rate=item["channel_fee_rate"],
                 channel_fee_amount=item["channel_fee_amount"],
                 settlement_amount=item["settlement_amount"],
@@ -3466,10 +3574,122 @@ def generate_settlement_statement(
         action,
         "settlement_statement",
         str(statement.id),
-        f"生成渠道对账单：{period} / {channel.name}",
+        f"生成渠道月结单：{period} / {channel.name}",
     )
     db.commit()
     return {"id": statement.id, "period": statement.period, "channel_id": statement.channel_id, "status": statement.status}
+
+
+@app.post("/settlement-statements/generate-all-for-period")
+def generate_all_channel_settlements_for_period(
+    payload: SettlementGenerateAllForPeriodIn,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance])),
+):
+    """按账期为所有在导入数据中出现且可映射的渠道生成/覆盖月结单（一渠道一单、多游戏明细）。"""
+    period = _normalize_period_yyyymm(payload.period)
+    task_ids = _active_confirmed_recon_task_ids_for_billing(db, period)
+    if len(task_ids) > 1:
+        raise HTTPException(status_code=400, detail=BILLING_PERIOD_MULTI_ACTIVE_CONFIRMED_IMPORTS)
+    if len(task_ids) == 0:
+        any_c = db.scalars(select(ReconTask).where(ReconTask.period == period, ReconTask.status == ReconStatus.confirmed)).all()
+        if not any_c:
+            raise HTTPException(status_code=400, detail="该账期无已确认核对任务")
+        raise HTTPException(
+            status_code=400,
+            detail="该账期无已确认且有效的导入批次，请先在导入数据中心处理后再生成月结单。",
+        )
+    channel_ids = _settlement_channel_ids_for_period(db, period, task_ids)
+    if not channel_ids:
+        raise HTTPException(status_code=400, detail="该账期无可用渠道游戏映射数据，无法生成月结单")
+    ok: list[dict] = []
+    errors: list[dict] = []
+    for cid in channel_ids:
+        inner_existing = db.scalar(
+            select(ChannelSettlementStatement).where(
+                ChannelSettlementStatement.period == period,
+                ChannelSettlementStatement.channel_id == cid,
+            )
+        )
+        if inner_existing and not payload.overwrite:
+            errors.append({"channel_id": cid, "detail": "已存在月结单，请勾选覆盖重生成或先删除后重试"})
+            continue
+        try:
+            (
+                ch,
+                items_by_game,
+                total_gross_amount,
+                total_discount_amount,
+                total_settlement_base_amount,
+                total_channel_fee_amount,
+                total_settlement_amount,
+                party_platform_name,
+                party_channel_name,
+            ) = _build_settlement_snapshot(db, period, cid)
+            now = dt.datetime.now()
+            if inner_existing:
+                old_items = db.scalars(
+                    select(ChannelSettlementStatementItem).where(ChannelSettlementStatementItem.statement_id == inner_existing.id)
+                ).all()
+                for old in old_items:
+                    db.delete(old)
+                st = inner_existing
+            else:
+                st = ChannelSettlementStatement(
+                    period=period,
+                    channel_id=cid,
+                    created_by=ctx["user"],
+                    status="generated",
+                    created_at=now,
+                    updated_at=now,
+                )
+                db.add(st)
+                db.flush()
+            st.total_gross_amount = total_gross_amount
+            st.total_discount_amount = total_discount_amount
+            st.total_settlement_base_amount = total_settlement_base_amount
+            st.total_channel_fee_amount = total_channel_fee_amount
+            st.total_settlement_amount = total_settlement_amount
+            st.party_platform_name = party_platform_name
+            st.party_channel_name = party_channel_name
+            st.status = "generated"
+            st.updated_at = now
+            sort_order = 1
+            for item in sorted(items_by_game.values(), key=lambda x: x["game_name_snapshot"]):
+                db.add(
+                    ChannelSettlementStatementItem(
+                        statement_id=st.id,
+                        game_id=item["game_id"],
+                        raw_game_name_snapshot=item["raw_game_name_snapshot"],
+                        game_name_snapshot=item["game_name_snapshot"],
+                        gross_amount=item["gross_amount"],
+                        discount_amount=item["discount_amount"],
+                        test_fee_amount=item["test_fee_amount"],
+                        coupon_amount=item["coupon_amount"],
+                        settlement_base_amount=item["settlement_base_amount"],
+                        share_ratio=item["share_ratio"],
+                        channel_fee_rate=item["channel_fee_rate"],
+                        channel_fee_amount=item["channel_fee_amount"],
+                        settlement_amount=item["settlement_amount"],
+                        sort_order=sort_order,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                sort_order += 1
+            write_system_audit(
+                db,
+                ctx["user"],
+                "generate_settlement_batch",
+                "settlement_statement",
+                str(st.id),
+                f"批量生成渠道月结单：{period} / {ch.name}",
+            )
+            ok.append({"id": st.id, "channel_id": cid, "channel_name": ch.name})
+        except HTTPException as e:
+            errors.append({"channel_id": cid, "detail": e.detail})
+    db.commit()
+    return {"period": period, "generated": ok, "errors": errors}
 
 
 @app.get("/settlement-statements/{statement_id}")
@@ -3487,6 +3707,8 @@ def get_settlement_statement(
         .where(ChannelSettlementStatementItem.statement_id == statement_id)
         .order_by(ChannelSettlementStatementItem.sort_order.asc(), ChannelSettlementStatementItem.id.asc())
     ).all()
+    party_a = getattr(statement, "party_platform_name", None) or "广州熊动科技有限公司"
+    party_b = getattr(statement, "party_channel_name", None) or ""
     return {
         "id": statement.id,
         "period": statement.period,
@@ -3499,6 +3721,8 @@ def get_settlement_statement(
         "total_channel_fee_amount": statement.total_channel_fee_amount,
         "total_settlement_amount": statement.total_settlement_amount,
         "note": statement.note,
+        "party_platform_name": party_a,
+        "party_channel_name": party_b,
         "created_by": statement.created_by,
         "created_at": statement.created_at,
         "updated_at": statement.updated_at,
@@ -3510,7 +3734,10 @@ def get_settlement_statement(
                 "game_name_snapshot": x.game_name_snapshot,
                 "gross_amount": x.gross_amount,
                 "discount_amount": x.discount_amount,
+                "test_fee_amount": getattr(x, "test_fee_amount", Decimal("0")),
+                "coupon_amount": getattr(x, "coupon_amount", Decimal("0")),
                 "settlement_base_amount": x.settlement_base_amount,
+                "share_ratio": getattr(x, "share_ratio", x.channel_fee_rate),
                 "channel_fee_rate": x.channel_fee_rate,
                 "channel_fee_amount": x.channel_fee_amount,
                 "settlement_amount": x.settlement_amount,
@@ -3538,44 +3765,84 @@ def export_settlement_statement(
     ).all()
     wb = Workbook()
     ws = wb.active
-    ws.title = "渠道结算对账单"
-    ws["A1"] = "渠道结算对账单"
-    ws["A3"] = "结算周期"
-    ws["B3"] = statement.period
-    ws["D3"] = "渠道名称"
-    ws["E3"] = channel.name if channel else ""
-    ws["A5"] = "游戏名称"
-    ws["B5"] = "系统流水"
-    ws["C5"] = "减免/测试金"
-    ws["D5"] = "结算基数"
-    ws["E5"] = "通道费率"
-    ws["F5"] = "通道费金额"
-    ws["G5"] = "对账金额"
-    row_idx = 6
+    ws.title = "月结单"
+    ch_label = channel.name if channel else ""
+    yymm = statement.period.replace("-", "")
+    ws.merge_cells("A1:I1")
+    title_cell = ws["A1"]
+    title_cell.value = f"{ch_label} & 熊动结算对账单{yymm}"
+    title_cell.font = Font(bold=True, size=14)
+    title_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    note_row = 2
+    ws.merge_cells(start_row=note_row, start_column=1, end_row=note_row, end_column=9)
+    c_note = ws.cell(
+        row=note_row,
+        column=1,
+        value="说明：合作总收入、参与分成金额、结算金额等为系统按导入流水与映射规则汇总，测试费/代金券暂无导入字段时为 0。",
+    )
+    c_note.alignment = Alignment(wrap_text=True, vertical="top")
+    headers = [
+        "结算月份",
+        "游戏名称",
+        "合作总收入",
+        "测试费",
+        "代金券",
+        "参与分成金额",
+        "分成比例",
+        "通道费",
+        "结算金额",
+    ]
+    start_row = 4
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(row=start_row, column=col, value=h)
+        cell.font = Font(bold=True)
+    row_idx = start_row + 1
     for item in items:
-        ws[f"A{row_idx}"] = item.game_name_snapshot
-        ws[f"B{row_idx}"] = float(item.gross_amount)
-        ws[f"C{row_idx}"] = float(item.discount_amount)
-        ws[f"D{row_idx}"] = float(item.settlement_base_amount)
-        ws[f"E{row_idx}"] = float(item.channel_fee_rate)
-        ws[f"F{row_idx}"] = float(item.channel_fee_amount)
-        ws[f"G{row_idx}"] = float(item.settlement_amount)
+        tf = float(getattr(item, "test_fee_amount", 0) or 0)
+        cp = float(getattr(item, "coupon_amount", 0) or 0)
+        sh = float(getattr(item, "share_ratio", item.channel_fee_rate) or 0)
+        ws.cell(row=row_idx, column=1, value=statement.period)
+        ws.cell(row=row_idx, column=2, value=item.game_name_snapshot)
+        ws.cell(row=row_idx, column=3, value=float(item.gross_amount))
+        ws.cell(row=row_idx, column=4, value=tf)
+        ws.cell(row=row_idx, column=5, value=cp)
+        ws.cell(row=row_idx, column=6, value=float(item.settlement_base_amount))
+        c_ratio = ws.cell(row=row_idx, column=7, value=sh)
+        c_ratio.number_format = "0.00%"
+        ws.cell(row=row_idx, column=8, value=float(item.channel_fee_amount))
+        ws.cell(row=row_idx, column=9, value=float(item.settlement_amount))
+        for col in (3, 4, 5, 6, 8, 9):
+            ws.cell(row=row_idx, column=col).number_format = "#,##0.00"
         row_idx += 1
-    ws[f"A{row_idx}"] = "合计"
-    ws[f"B{row_idx}"] = float(statement.total_gross_amount)
-    ws[f"C{row_idx}"] = float(statement.total_discount_amount)
-    ws[f"D{row_idx}"] = float(statement.total_settlement_base_amount)
-    ws[f"F{row_idx}"] = float(statement.total_channel_fee_amount)
-    ws[f"G{row_idx}"] = float(statement.total_settlement_amount)
-    ws[f"A{row_idx + 2}"] = "备注"
-    ws[f"B{row_idx + 2}"] = statement.note or ""
-    ws.column_dimensions["A"].width = 24
-    ws.column_dimensions["B"].width = 14
-    ws.column_dimensions["C"].width = 14
-    ws.column_dimensions["D"].width = 14
-    ws.column_dimensions["E"].width = 12
-    ws.column_dimensions["F"].width = 14
-    ws.column_dimensions["G"].width = 14
+    ws.cell(row=row_idx, column=1, value="合计")
+    sum_row = row_idx
+    ws.cell(row=sum_row, column=3, value=float(statement.total_gross_amount))
+    ws.cell(row=sum_row, column=4, value=sum(float(getattr(x, "test_fee_amount", 0) or 0) for x in items))
+    ws.cell(row=sum_row, column=5, value=sum(float(getattr(x, "coupon_amount", 0) or 0) for x in items))
+    ws.cell(row=sum_row, column=6, value=float(statement.total_settlement_base_amount))
+    ws.cell(row=sum_row, column=8, value=float(statement.total_channel_fee_amount))
+    ws.cell(row=sum_row, column=9, value=float(statement.total_settlement_amount))
+    for col in (3, 4, 5, 6, 8, 9):
+        ws.cell(row=sum_row, column=col).number_format = "#,##0.00"
+        cell_font = Font(bold=True)
+        ws.cell(row=sum_row, column=col).font = cell_font
+    ws.cell(row=sum_row, column=1).font = Font(bold=True)
+    row_idx = sum_row + 2
+    party_a = getattr(statement, "party_platform_name", None) or "广州熊动科技有限公司"
+    party_b = getattr(statement, "party_channel_name", None) or ch_label
+    ws.cell(row=row_idx, column=1, value="甲方（平台）")
+    ws.cell(row=row_idx, column=2, value=party_a)
+    row_idx += 1
+    ws.cell(row=row_idx, column=1, value="乙方")
+    ws.cell(row=row_idx, column=2, value=party_b)
+    row_idx += 1
+    ws.cell(row=row_idx, column=1, value="备注")
+    ws.merge_cells(start_row=row_idx, start_column=2, end_row=row_idx, end_column=9)
+    ws.cell(row=row_idx, column=2, value=statement.note or "")
+    ws.cell(row=row_idx, column=2).alignment = Alignment(wrap_text=True, vertical="top")
+    widths = [12, 26, 14, 10, 10, 16, 12, 12, 14]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
     bio = io.BytesIO()
     wb.save(bio)
     write_system_audit(
