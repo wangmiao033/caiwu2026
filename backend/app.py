@@ -1841,20 +1841,44 @@ def _contract_excel_parse_date(val: object) -> Optional[dt.date]:
         return None
     if isinstance(val, float) and pd.isna(val):
         return None
-    if isinstance(val, dt.datetime):
+    try:
+        if pd.api.types.is_scalar(val) and pd.isna(val):
+            return None
+    except (TypeError, ValueError):
+        pass
+    # pd.Timestamp 是 datetime 子类；NaT 需先于 .date() 拦截，否则可能得到不可与 date 比较的 NaT
+    if isinstance(val, pd.Timestamp):
+        if pd.isna(val):
+            return None
         return val.date()
+    if isinstance(val, dt.datetime):
+        try:
+            if pd.isna(val):
+                return None
+        except TypeError:
+            pass
+        try:
+            return val.date()
+        except (ValueError, OSError):
+            return None
     if isinstance(val, dt.date):
         return val
     s = str(val).strip()
-    if not s:
+    if not s or s.lower() in {"nat", "nan", "none"}:
         return None
     ts = pd.to_datetime(s, errors="coerce")
     if pd.isna(ts):
         return None
     try:
-        return ts.date()
-    except Exception:
+        out = ts.date()
+    except (ValueError, OSError, OverflowError):
         return None
+    try:
+        if isinstance(out, dt.date) and pd.isna(out):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return out if isinstance(out, dt.date) else None
 
 
 def _contract_excel_read_frame(filename: str, raw: bytes) -> pd.DataFrame:
