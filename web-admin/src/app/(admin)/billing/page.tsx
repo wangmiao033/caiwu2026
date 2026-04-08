@@ -17,6 +17,7 @@ type BillRow = {
   status: string;
   version: number;
   collection_status: string;
+  lifecycle_status?: "active" | "discarded";
   invoice_status?: string;
   receipt_status?: string;
   received_total?: number;
@@ -92,7 +93,12 @@ export default function BillingPage() {
   const [list, setList] = useState<BillRow[]>([]);
   const [filterType, setFilterType] = useState<string>(searchParams.get("type") || "");
   const [filterText, setFilterText] = useState(searchParams.get("keyword") || "");
+  const [billLifecycle, setBillLifecycle] = useState<"active" | "discarded" | "all">(() => {
+    const v = (searchParams.get("lifecycle_status") || "active").trim();
+    return (v === "discarded" || v === "all" || v === "active" ? v : "active") as "active" | "discarded" | "all";
+  });
   const [sendingId, setSendingId] = useState<number | null>(null);
+  const [discardingId, setDiscardingId] = useState<number | null>(null);
   const [detail, setDetail] = useState<BillDetail | null>(null);
   const [showTrial, setShowTrial] = useState(parseBool(searchParams.get("show_trial"), false));
   const [reconMode, setReconMode] = useState(parseBool(searchParams.get("recon_mode"), true));
@@ -134,6 +140,7 @@ export default function BillingPage() {
       const q = new URLSearchParams();
       if (nextPeriod) q.set("period", nextPeriod);
       if (filterType) q.set("bill_type", filterType);
+      if (billLifecycle) q.set("lifecycle_status", billLifecycle);
       const query = `/billing/bills${q.toString() ? `?${q.toString()}` : ""}`;
       const data = await apiRequest<BillRow[]>(query);
       setList(data);
@@ -143,6 +150,36 @@ export default function BillingPage() {
     } catch (e) {
       message.error((e as Error).message);
     }
+  };
+
+  const canDiscardBill = (b: BillRow) => {
+    if (b.lifecycle_status === "discarded") return false;
+    const isDraft = b.status === "待发送" || b.flow_status === "草稿";
+    const noInvoice = (b.invoice_status || "待开票") !== "已开票";
+    const noReceipt = (b.receipt_status || "待回款") === "待回款" && Number(b.received_total || 0) <= 0;
+    const outstandingOk =
+      b.outstanding_amount === undefined || b.amount === undefined ? true : Number(b.outstanding_amount || 0) >= Number(b.amount || 0);
+    return isDraft && noInvoice && noReceipt && outstandingOk;
+  };
+
+  const discardBill = (b: BillRow) => {
+    Modal.confirm({
+      title: "作废账单",
+      content: "该账单将标记为作废，不再参与默认列表和后续流程，是否继续？",
+      okType: "danger",
+      onOk: async () => {
+        setDiscardingId(b.id);
+        try {
+          await apiRequest(`/billing/${b.id}/discard`, "POST");
+          message.success("账单已作废");
+          await loadBills();
+        } catch (e) {
+          message.error((e as Error).message);
+        } finally {
+          setDiscardingId(null);
+        }
+      },
+    });
   };
 
   const applyPeriod = async (nextRaw: string) => {
@@ -319,6 +356,7 @@ export default function BillingPage() {
     if (period) params.set("period", period);
     if (filterText) params.set("keyword", filterText);
     if (filterType) params.set("type", filterType);
+    if (billLifecycle && billLifecycle !== "active") params.set("lifecycle_status", billLifecycle);
     if (!reconMode) params.set("recon_mode", "0");
     if (showTrial) params.set("show_trial", "1");
     if (pageSize !== 100) params.set("page_size", String(pageSize));
@@ -332,7 +370,7 @@ export default function BillingPage() {
         /* ignore */
       }
     }
-  }, [period, filterText, filterType, reconMode, showTrial, pageSize, currentPage, detail?.id, router]);
+  }, [period, filterText, filterType, billLifecycle, reconMode, showTrial, pageSize, currentPage, detail?.id, router]);
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
@@ -378,6 +416,17 @@ export default function BillingPage() {
               ]}
               value={filterType || undefined}
               onChange={(v) => setFilterType(v || "")}
+            />
+            <Select
+              placeholder="生命周期"
+              style={{ width: 140 }}
+              options={[
+                { label: "有效账单", value: "active" },
+                { label: "已作废", value: "discarded" },
+                { label: "全部", value: "all" },
+              ]}
+              value={billLifecycle}
+              onChange={(v) => setBillLifecycle((v || "active") as "active" | "discarded" | "all")}
             />
             <Button onClick={() => loadBills()}>查询</Button>
             <Select
@@ -451,7 +500,12 @@ export default function BillingPage() {
                   {
                     title: "状态",
                     dataIndex: "flow_status",
-                    render: (v: string) => <Tag color={v === "已回款" ? "green" : v === "部分回款" ? "gold" : v === "已开票" ? "blue" : "default"}>{v || "-"}</Tag>,
+                    render: (v: string, r: BillRow) =>
+                      r.lifecycle_status === "discarded" ? (
+                        <Tag color="default">已作废</Tag>
+                      ) : (
+                        <Tag color={v === "已回款" ? "green" : v === "部分回款" ? "gold" : v === "已开票" ? "blue" : "default"}>{v || "-"}</Tag>
+                      ),
                   },
                   {
                     title: "操作",
@@ -499,7 +553,12 @@ export default function BillingPage() {
                   {
                     title: "账单状态",
                     dataIndex: "flow_status",
-                    render: (v: string) => <Tag color={v === "已回款" ? "green" : v === "部分回款" ? "gold" : v === "已开票" ? "blue" : "default"}>{v || "-"}</Tag>,
+                    render: (v: string, r: BillRow) =>
+                      r.lifecycle_status === "discarded" ? (
+                        <Tag color="default">已作废</Tag>
+                      ) : (
+                        <Tag color={v === "已回款" ? "green" : v === "部分回款" ? "gold" : v === "已开票" ? "blue" : "default"}>{v || "-"}</Tag>
+                      ),
                   },
                   { title: "回款状态", dataIndex: "receipt_status", render: (v: string) => <Tag color={v === "已回款" ? "green" : v === "部分回款" ? "gold" : "blue"}>{v || "-"}</Tag> },
                   { title: "已回款金额", dataIndex: "received_total", render: (v: number) => v ?? 0 },
@@ -514,12 +573,22 @@ export default function BillingPage() {
                         <Button size="small" onClick={() => openDetailInNewTab(r.id)}>
                           新标签打开
                         </Button>
-                        <Button size="small" loading={sendingId === r.id} onClick={() => sendBill(r.id, "已发送")}>
+                        <Button
+                          size="small"
+                          disabled={r.lifecycle_status === "discarded"}
+                          loading={sendingId === r.id}
+                          onClick={() => sendBill(r.id, "已发送")}
+                        >
                           发送
                         </Button>
-                        <Button size="small" onClick={() => sendBill(r.id, "对方确认")}>
+                        <Button size="small" disabled={r.lifecycle_status === "discarded"} onClick={() => sendBill(r.id, "对方确认")}>
                           确认
                         </Button>
+                        {canDiscardBill(r) && (
+                          <Button size="small" danger loading={discardingId === r.id} onClick={() => discardBill(r)}>
+                            作废
+                          </Button>
+                        )}
                       </Space>
                     ),
                   },

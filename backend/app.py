@@ -341,6 +341,7 @@ class Bill(Base):
     version: Mapped[int] = mapped_column(default=1)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
     collection_status: Mapped[CollectionStatus] = mapped_column(Enum(CollectionStatus), default=CollectionStatus.pending)
+    lifecycle_status: Mapped[str] = mapped_column(String(20), default="active", index=True)
 
 
 class BillDeliveryLog(Base):
@@ -948,6 +949,20 @@ def ensure_game_share_percent_column():
         pass
 
 
+def ensure_bill_lifecycle_status_column():
+    inspector = inspect(engine)
+    if "bills" not in inspector.get_table_names():
+        return
+    existing = {c["name"] for c in inspector.get_columns("bills")}
+    if "lifecycle_status" in existing:
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE bills ADD COLUMN lifecycle_status VARCHAR(20) DEFAULT 'active'"))
+    except Exception:
+        pass
+
+
 def ensure_import_enrichment_columns():
     inspector = inspect(engine)
     if "raw_statements" in inspector.get_table_names():
@@ -1021,6 +1036,7 @@ def startup():
     ensure_user_profiles_role_string()
     ensure_game_variant_settlement_columns()
     ensure_game_share_percent_column()
+    ensure_bill_lifecycle_status_column()
     ensure_import_enrichment_columns()
     with SessionLocal() as db:
         create_default_data(db)
@@ -2472,10 +2488,13 @@ def generate_bills(
 def list_bills(
     period: Optional[str] = None,
     bill_type: Optional[BillType] = None,
+    lifecycle_status: Optional[str] = "active",
     db: Session = Depends(get_db),
     _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops])),
 ):
     stmt = select(Bill).order_by(Bill.id.desc())
+    if lifecycle_status in {"active", "discarded"}:
+        stmt = stmt.where(Bill.lifecycle_status == lifecycle_status)
     if period:
         stmt = stmt.where(Bill.period == period)
     if bill_type:
@@ -2505,6 +2524,7 @@ def list_bills(
                 "status": b.status,
                 "version": b.version,
                 "collection_status": b.collection_status,
+                "lifecycle_status": b.lifecycle_status,
                 "invoice_status": invoice_status,
                 "receipt_status": receipt_status,
                 "flow_status": flow_status,
@@ -2549,6 +2569,7 @@ def get_bill_detail(
         "status": b.status,
         "version": b.version,
         "collection_status": b.collection_status,
+        "lifecycle_status": b.lifecycle_status,
         "invoice_status": invoice_status,
         "receipt_status": receipt_status,
         "flow_status": flow_status,
@@ -2568,6 +2589,44 @@ def get_bill_detail(
             "receipt_status": receipt_status,
         },
     }
+
+
+@app.post("/billing/{bill_id}/discard")
+def discard_bill(
+    bill_id: int,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance])),
+):
+    bill = db.get(Bill, bill_id)
+    if not bill:
+        raise HTTPException(status_code=404, detail="账单不存在")
+    if (bill.lifecycle_status or "active") == "discarded":
+        return {"bill_id": bill.id, "lifecycle_status": "discarded", "already_discarded": True}
+
+    invoices = db.scalars(select(Invoice).where(Invoice.bill_id == bill.id)).all()
+    if invoices:
+        raise HTTPException(status_code=400, detail="存在关联发票，禁止作废")
+    receipts = db.scalars(select(Receipt).where(Receipt.bill_id == bill.id)).all()
+    if receipts:
+        raise HTTPException(status_code=400, detail="存在关联回款，禁止作废")
+    received_total = sum((Decimal(str(x.amount)) for x in receipts), Decimal("0"))
+    if received_total > 0:
+        raise HTTPException(status_code=400, detail="已发生回款，禁止作废")
+
+    if bill.status != BillStatus.draft:
+        raise HTTPException(status_code=400, detail="仅草稿账单允许作废")
+    delivery_count = int(db.scalar(select(func.count(BillDeliveryLog.id)).where(BillDeliveryLog.bill_id == bill.id)) or 0)
+    if delivery_count > 0:
+        raise HTTPException(status_code=400, detail="存在发送/交付记录，禁止作废")
+
+    outstanding_amount = max(Decimal("0"), Decimal(str(bill.amount)) - received_total)
+    if outstanding_amount != Decimal(str(bill.amount)):
+        raise HTTPException(status_code=400, detail="存在已回款金额，禁止作废")
+
+    bill.lifecycle_status = "discarded"
+    write_system_audit(db, ctx["user"], "discard_bill", "bill", str(bill.id), f"作废账单: {bill.period}/{bill.bill_type}/{bill.target_name}")
+    db.commit()
+    return {"bill_id": bill.id, "lifecycle_status": bill.lifecycle_status}
 
 
 @app.post("/billing/cleanup-duplicates")
@@ -2672,6 +2731,8 @@ def send_bill(bill_id: int, payload: BillStatusIn, db: Session = Depends(get_db)
     bill = db.get(Bill, bill_id)
     if not bill:
         raise HTTPException(status_code=404, detail="账单不存在")
+    if (bill.lifecycle_status or "active") == "discarded":
+        raise HTTPException(status_code=400, detail="已作废账单不可发送/确认")
     bill.status = payload.status
     if payload.status in (BillStatus.sent, BillStatus.acknowledged, BillStatus.disputed):
         db.add(BillDeliveryLog(bill_id=bill_id, note=payload.note))
@@ -2685,6 +2746,8 @@ def create_invoice(payload: InvoiceIn, db: Session = Depends(get_db), _: dict = 
     bill = db.get(Bill, payload.bill_id)
     if not bill:
         raise HTTPException(status_code=404, detail="账单不存在")
+    if (bill.lifecycle_status or "active") == "discarded":
+        raise HTTPException(status_code=400, detail="已作废账单不可开票")
     invoice = Invoice(
         invoice_no=payload.invoice_no,
         bill_id=payload.bill_id,
@@ -2764,6 +2827,8 @@ def register_receipt(payload: ReceiptIn, db: Session = Depends(get_db), _: dict 
     bill = db.get(Bill, payload.bill_id)
     if not bill:
         raise HTTPException(status_code=404, detail="账单不存在")
+    if (bill.lifecycle_status or "active") == "discarded":
+        raise HTTPException(status_code=400, detail="已作废账单不可回款")
     receipt = Receipt(
         bill_id=payload.bill_id,
         received_at=payload.received_at,
