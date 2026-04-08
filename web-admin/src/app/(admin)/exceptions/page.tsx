@@ -5,142 +5,31 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Button, Card, Modal, Result, Segmented, Select, Space, Table, Tag, Typography, message } from "antd";
 import dayjs from "dayjs";
 import { apiRequest } from "@/lib/api";
-import { ExceptionOverviewResponse, ExceptionRange, ExceptionStatus, ExceptionType, getExceptionsOverview, updateExceptionStatus } from "@/lib/api/exceptions";
+import { ExceptionOverviewResponse, getExceptionsOverview, updateExceptionStatus } from "@/lib/api/exceptions";
 import { getCurrentRole } from "@/lib/rbac";
-
-type ExceptionStatusText = "待处理" | "已忽略" | "已解决";
-type DayRange = 7 | 30 | 90;
-type StatusFilter = "all" | ExceptionStatusText;
-type SourceFilter = "all" | "import_issue" | "channel_game_map" | "import_history" | "billing" | "import";
-type TypeFilter = "all" | ExceptionType;
-
-type UnifiedExceptionRow = {
-  key: string;
-  id: string;
-  type: ExceptionType;
-  typeLabel: string;
-  source: string;
-  sourceLabel: string;
-  status: ExceptionStatusText;
-  detectedAt: string;
-  taskId?: number;
-  importHistoryId?: number;
-  period?: string;
-  batchName?: string;
-  detail: string;
-  raw: Record<string, unknown>;
-};
-
-const TYPE_LABEL: Record<ExceptionType, string> = {
-  share: "分成异常",
-  channel: "未匹配渠道(旧)",
-  game: "未匹配游戏(旧)",
-  import: "导入失败(旧)",
-  overdue: "超期未结算",
-  unmatched_channel: "未匹配渠道",
-  unmatched_game: "未匹配游戏",
-  unmapped_pair: "未映射组合",
-  variant_unmatched: "版本未匹配",
-  import_failed: "导入失败",
-};
-
-const STATUS_COLOR: Record<ExceptionStatusText, string> = {
-  待处理: "red",
-  已忽略: "default",
-  已解决: "green",
-};
-
-const TYPE_WHITE_LIST: TypeFilter[] = [
-  "all",
-  "share",
-  "unmatched_channel",
-  "unmatched_game",
-  "unmapped_pair",
-  "variant_unmatched",
-  "import_failed",
-  "overdue",
-];
-const STATUS_QUERY_WHITE_LIST = ["all", "pending", "ignored", "resolved"] as const;
-const RANGE_WHITE_LIST = ["7d", "30d", "90d"] as const;
-
-const parseTypeFilter = (value: string | null): TypeFilter => (value && TYPE_WHITE_LIST.includes(value as TypeFilter) ? (value as TypeFilter) : "all");
-const parseStatusFilter = (value: string | null): StatusFilter => {
-  if (value === "pending") return "待处理";
-  if (value === "ignored") return "已忽略";
-  if (value === "resolved") return "已解决";
-  return "all";
-};
-const parseRangeFilter = (value: string | null): DayRange => {
-  if (value === "7d") return 7;
-  if (value === "90d") return 90;
-  return 30;
-};
-const rangeToQuery = (value: DayRange): ExceptionRange => (value === 7 ? "7d" : value === 90 ? "90d" : "30d");
-
-const toStatusText = (status: string): ExceptionStatusText => {
-  if (status === "ignored") return "已忽略";
-  if (status === "resolved") return "已解决";
-  return "待处理";
-};
-const toStatusValue = (status: ExceptionStatusText): ExceptionStatus => {
-  if (status === "已忽略") return "ignored";
-  if (status === "已解决") return "resolved";
-  return "pending";
-};
-const statusFilterToQuery = (value: StatusFilter): "all" | ExceptionStatus => (value === "all" ? "all" : toStatusValue(value));
-
-const sourceLabel = (source: string) => {
-  if (source === "import_issue") return "导入批次异常";
-  if (source === "channel_game_map") return "分成规则";
-  if (source === "import_history") return "导入历史";
-  if (source === "billing") return "账单";
-  if (source === "import") return "导入数据";
-  return source || "未知来源";
-};
-
-const normalizeType = (rawType: string): ExceptionType => {
-  const known = rawType as ExceptionType;
-  if (
-    [
-      "share",
-      "channel",
-      "game",
-      "import",
-      "overdue",
-      "unmatched_channel",
-      "unmatched_game",
-      "unmapped_pair",
-      "variant_unmatched",
-      "import_failed",
-    ].includes(known)
-  ) {
-    return known;
-  }
-  return "import_failed";
-};
-
-const parsePairFromDetail = (detail: string): { channel: string; game: string } => {
-  const text = detail || "";
-  const part = text.split(":").slice(1).join(":").trim();
-  const seg = part || text;
-  const [channel, game] = seg.split("/").map((s) => s.trim());
-  return { channel: channel || "", game: game || "" };
-};
-
-/** 后端 / 异常中心分成字段为 0~1 比例 */
-const formatRatioPercent = (ratio: unknown) => {
-  const n = Number(ratio);
-  if (Number.isNaN(n)) return "-";
-  return `${Number((n * 100).toFixed(4)).toString()}%`;
-};
-
-const shareExceptionReasonText = (raw: Record<string, unknown>) => {
-  const total = Number(raw.total_ratio);
-  if (!Number.isNaN(total)) {
-    return `渠道-游戏映射中分成比例合计为 ${formatRatioPercent(total)}，与 100% 不一致，需调整该渠道与游戏对应规则或映射。`;
-  }
-  return "渠道-游戏映射中渠道分成与研发分成（等）合计偏离 100%，请核对并修正。";
-};
+import {
+  STATUS_COLOR,
+  buildBillingRulesHubUrl,
+  buildChannelGameMapHubUrl,
+  buildQuickNavigationUrl,
+  exceptionHandleQuery,
+  flattenOverviewToRows,
+  formatRatioPercent,
+  listContextFromFilters,
+  parseRangeFilter,
+  parseStatusFilter,
+  parseTypeFilter,
+  rangeToQuery,
+  shareExceptionReasonText,
+  statusFilterToQuery,
+  toStatusValue,
+  type DayRange,
+  type ExceptionStatusText,
+  type SourceFilter,
+  type StatusFilter,
+  type TypeFilter,
+  type UnifiedExceptionRow,
+} from "./exceptions-shared";
 
 export default function ExceptionsPage() {
   const router = useRouter();
@@ -161,6 +50,8 @@ export default function ExceptionsPage() {
   const [bulkResolving, setBulkResolving] = useState(false);
   const [bulkRecomputing, setBulkRecomputing] = useState(false);
   const [recomputeId, setRecomputeId] = useState<string | null>(null);
+
+  const listNavCtx = () => listContextFromFilters(typeFilter, statusFilter, range);
 
   const loadData = async () => {
     setLoading(true);
@@ -193,37 +84,7 @@ export default function ExceptionsPage() {
     router.replace(`${pathname}?${next.toString()}`, { scroll: false });
   }, [typeFilter, statusFilter, range, pathname, router, searchParams]);
 
-  const rows = useMemo<UnifiedExceptionRow[]>(() => {
-    const out: UnifiedExceptionRow[] = [];
-    const items = overview?.items || {};
-    Object.entries(items).forEach(([bucket, arr]) => {
-      (arr || []).forEach((raw) => {
-        const row = raw as Record<string, unknown>;
-        const type = normalizeType(String(row.type || bucket || "import_failed"));
-        const id = String(row.id || "");
-        const source = String(row.source_module || bucket || "");
-        const status = toStatusText(String(row.status || "pending"));
-        const detailText = String(row.detail || row.fail_reason || row.match_status || "");
-        out.push({
-          key: `${type}:${id}`,
-          id,
-          type,
-          typeLabel: TYPE_LABEL[type] || type,
-          source,
-          sourceLabel: sourceLabel(source),
-          status,
-          detectedAt: String(row.detected_at || ""),
-          taskId: Number(row.task_id || 0) || undefined,
-          importHistoryId: Number(row.import_history_id || 0) || undefined,
-          period: String(row.period || ""),
-          batchName: String(row.batch_name || ""),
-          detail: detailText || "请通过快捷入口处理该异常",
-          raw: row,
-        });
-      });
-    });
-    return out.sort((a, b) => (a.detectedAt < b.detectedAt ? 1 : -1));
-  }, [overview]);
+  const rows = useMemo(() => flattenOverviewToRows(overview), [overview]);
 
   const filteredRows = useMemo(() => {
     return rows.filter((r) => (sourceFilter === "all" ? true : r.source === sourceFilter));
@@ -233,54 +94,19 @@ export default function ExceptionsPage() {
     setSelectedRowKeys([]);
   }, [range, statusFilter, typeFilter, sourceFilter]);
 
-  const appendExceptionListContext = (qs: URLSearchParams) => {
-    qs.set("ex_type", String(typeFilter));
-    qs.set("ex_status", String(statusFilterToQuery(statusFilter)));
-    qs.set("ex_range", rangeToQuery(range));
+  const goHandlePage = (row: UnifiedExceptionRow) => {
+    const q = exceptionHandleQuery(listNavCtx());
+    router.push(`/exceptions/${encodeURIComponent(row.key)}/handle?${q}`);
   };
 
-  const buildQuickNavigationUrl = (row: UnifiedExceptionRow): string => {
-    if (row.type === "unmatched_channel" || row.type === "channel") {
-      const ch = String(row.raw.raw_channel_name || "");
-      return `/channels${ch ? `?keyword=${encodeURIComponent(ch)}` : ""}`;
-    }
-    if (row.type === "unmatched_game" || row.type === "game") {
-      const gm = String(row.raw.raw_game_name || "");
-      return `/games${gm ? `?keyword=${encodeURIComponent(gm)}` : ""}`;
-    }
-    if (row.type === "unmapped_pair") {
-      const { channel, game } = parsePairFromDetail(row.detail);
-      const qs = new URLSearchParams();
-      if (channel) qs.set("channel", channel);
-      if (game) qs.set("game", game);
-      appendExceptionListContext(qs);
-      return `/channel-game-map?${qs.toString()}`;
-    }
-    if (row.type === "variant_unmatched") {
-      const gm = row.detail.split(":").slice(1).join(":").trim();
-      return `/game-variants${gm ? `?keyword=${encodeURIComponent(gm)}` : ""}`;
-    }
-    if (row.type === "share") {
-      const ch = String(row.raw.channel_name || "").trim();
-      const gm = String(row.raw.game_name || "").trim();
-      const qs = new URLSearchParams();
-      if (ch) qs.set("channel", ch);
-      if (gm) qs.set("game", gm);
-      appendExceptionListContext(qs);
-      return `/billing-rules?${qs.toString()}`;
-    }
-    if (row.type === "overdue") {
-      return "/billing";
-    }
-    return "/import?tab=history";
-  };
+  const buildQuickNavigationUrlWithCtx = (row: UnifiedExceptionRow) => buildQuickNavigationUrl(row, listNavCtx());
 
   const goQuick = (row: UnifiedExceptionRow) => {
-    router.push(buildQuickNavigationUrl(row));
+    router.push(buildQuickNavigationUrlWithCtx(row));
   };
 
   const goQuickNewTab = (row: UnifiedExceptionRow) => {
-    window.open(buildQuickNavigationUrl(row), "_blank", "noopener,noreferrer");
+    window.open(buildQuickNavigationUrlWithCtx(row), "_blank", "noopener,noreferrer");
   };
 
   const gotoBatch = (row: UnifiedExceptionRow) => {
@@ -526,11 +352,14 @@ export default function ExceptionsPage() {
             },
             {
               title: "操作",
-              width: 360,
+              width: 420,
               render: (_: unknown, row: UnifiedExceptionRow) => (
                 <Space size={4} wrap>
                   <Button type="link" onClick={() => setDetail(row)}>
                     查看详情
+                  </Button>
+                  <Button type="link" onClick={() => goHandlePage(row)}>
+                    独立处理
                   </Button>
                   <Button type="link" onClick={() => goQuick(row)}>
                     快捷处理
@@ -572,9 +401,16 @@ export default function ExceptionsPage() {
       <Modal open={!!detail} title="异常详情" onCancel={() => setDetail(null)} footer={null}>
         {detail ? (
           <Space direction="vertical" size={8} style={{ width: "100%" }}>
+            <Space wrap>
+              <Button type="link" onClick={() => goHandlePage(detail)}>
+                独立处理页
+              </Button>
+            </Space>
             <Typography.Text>异常ID：{detail.id}</Typography.Text>
             <Typography.Text>类型：{detail.typeLabel}</Typography.Text>
-            <Typography.Text>状态：<Tag color={STATUS_COLOR[detail.status]}>{detail.status}</Tag></Typography.Text>
+            <Typography.Text>
+              状态：<Tag color={STATUS_COLOR[detail.status]}>{detail.status}</Tag>
+            </Typography.Text>
             <Typography.Text>来源：{detail.sourceLabel}</Typography.Text>
             <Typography.Text>所属批次：{detail.batchName || "-"}</Typography.Text>
             <Typography.Text>账期：{detail.period || "-"}</Typography.Text>
@@ -594,27 +430,22 @@ export default function ExceptionsPage() {
                   建议处理：在「规则配置」中按上述渠道、游戏筛选后编辑对应行，或到「渠道-游戏映射」核对 revenue_share_ratio / rd_settlement_ratio。亦可点击「快捷处理」自动跳转并筛选。
                 </Typography.Text>
                 <Space wrap>
-                  {(() => {
-                    const ch = String(detail.raw.channel_name || "").trim();
-                    const gm = String(detail.raw.game_name || "").trim();
-                    const qs = new URLSearchParams();
-                    if (ch) qs.set("channel", ch);
-                    if (gm) qs.set("game", gm);
-                    qs.set("ex_type", String(typeFilter));
-                    qs.set("ex_status", String(statusFilterToQuery(statusFilter)));
-                    qs.set("ex_range", rangeToQuery(range));
-                    const q = qs.toString();
-                    return (
-                      <>
-                        <Button type="link" href={`/billing-rules?${q}`} target="_blank" rel="noopener noreferrer">
-                          规则配置（新标签）
-                        </Button>
-                        <Button type="link" href={`/channel-game-map?${q}`} target="_blank" rel="noopener noreferrer">
-                          渠道-游戏映射（新标签）
-                        </Button>
-                      </>
-                    );
-                  })()}
+                  <Button
+                    type="link"
+                    href={buildBillingRulesHubUrl(detail, listNavCtx())}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    规则配置（新标签）
+                  </Button>
+                  <Button
+                    type="link"
+                    href={buildChannelGameMapHubUrl(detail, listNavCtx())}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    渠道-游戏映射（新标签）
+                  </Button>
                 </Space>
               </>
             ) : (
