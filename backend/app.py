@@ -663,6 +663,7 @@ class ImportHistoryOut(Out):
     unmatched_variant_count: int = 0
     unresolved_issue_count: int = 0
     resolved_issue_count: int = 0
+    task_status: str = ""
 
 
 def get_db():
@@ -2746,34 +2747,83 @@ def update_receipt(receipt_id: int, payload: ReceiptIn, db: Session = Depends(ge
     return {"id": row.id}
 
 
+def _filter_import_history_rows(
+    db: Session,
+    rows: list[ImportHistory],
+    period: Optional[str],
+    import_type: Optional[str],
+    status: Optional[str],
+    keyword: Optional[str],
+    task_status: Optional[str] = None,
+) -> list[ImportHistory]:
+    out = list(rows)
+    if period:
+        out = [x for x in out if period in x.period]
+    if import_type:
+        out = [x for x in out if x.import_type == import_type]
+    if status:
+        out = [x for x in out if status in x.status]
+    if keyword:
+        kw = keyword.strip()
+        if kw:
+            out = [x for x in out if kw in f"{x.file_name}{x.summary}{x.created_by}{x.period}{x.task_id}"]
+    if task_status:
+        out = [x for x in out if _recon_task_status_str(db, x.task_id) == task_status]
+    return out
+
+
+def _recon_task_status_str(db: Session, task_id: int) -> str:
+    task = db.get(ReconTask, task_id)
+    if not task:
+        return ""
+    st = task.status
+    return st.value if isinstance(st, ReconStatus) else str(st)
+
+
 @app.get("/imports/history")
 def list_import_history(
     period: Optional[str] = None,
     import_type: Optional[str] = None,
     status: Optional[str] = None,
     keyword: Optional[str] = None,
+    task_status: Optional[str] = None,
     page: int = 1,
     page_size: int = 20,
     db: Session = Depends(get_db),
-    _: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech])),
+    _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops])),
 ):
     rows = db.scalars(select(ImportHistory).order_by(ImportHistory.id.desc())).all()
-    if period:
-        rows = [x for x in rows if period in x.period]
-    if import_type:
-        rows = [x for x in rows if x.import_type == import_type]
-    if status:
-        rows = [x for x in rows if status in x.status]
-    if keyword:
-        rows = [x for x in rows if keyword in f"{x.file_name}{x.summary}{x.created_by}"]
-    total = len(rows)
+    filtered = _filter_import_history_rows(db, rows, period, import_type, status, keyword, task_status)
+    total = len(filtered)
+    amt = Decimal("0")
+    matched_v = 0
+    unmatched_v = 0
+    for x in filtered:
+        amt += Decimal(str(x.amount_sum or 0))
+        matched_v += int(x.matched_variant_count or 0)
+        unmatched_v += int(x.unmatched_variant_count or 0)
+    summary = {
+        "batch_count": total,
+        "total_import_rows": sum(int(x.total_count or 0) for x in filtered),
+        "valid_rows": sum(int(x.valid_count or 0) for x in filtered),
+        "invalid_rows": sum(int(x.invalid_count or 0) for x in filtered),
+        "amount_sum": str(amt),
+        "matched_variant_rows": matched_v,
+        "unmatched_variant_rows": unmatched_v,
+    }
     start = (max(page, 1) - 1) * max(page_size, 1)
     end = start + max(page_size, 1)
-    return {"items": rows[start:end], "total": total, "page": page, "page_size": page_size}
+    page_rows = filtered[start:end]
+    items = []
+    for x in page_rows:
+        payload = ImportHistoryOut.model_validate(x).model_dump()
+        payload["task_status"] = _recon_task_status_str(db, x.task_id)
+        items.append(payload)
+    return {"items": items, "total": total, "page": page, "page_size": page_size, "summary": summary}
 
 
 @app.get("/imports/history/{history_id}", response_model=ImportHistoryOut)
-def get_import_history(history_id: int, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech]))):
+def get_import_history(history_id: int, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops]))):
     row = db.get(ImportHistory, history_id)
     if not row:
         raise HTTPException(status_code=404, detail="导入历史不存在")
@@ -2782,11 +2832,12 @@ def get_import_history(history_id: int, db: Session = Depends(get_db), _: dict =
     payload = ImportHistoryOut.model_validate(row)
     payload.unresolved_issue_count = int(unresolved or 0)
     payload.resolved_issue_count = int(resolved or 0)
+    payload.task_status = _recon_task_status_str(db, row.task_id)
     return payload
 
 
 @app.get("/imports/history/{history_id}/issues")
-def get_import_history_issues(history_id: int, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech]))):
+def get_import_history_issues(history_id: int, db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops]))):
     history = db.get(ImportHistory, history_id)
     if not history:
         raise HTTPException(status_code=404, detail="导入历史不存在")
@@ -2818,7 +2869,7 @@ def get_import_history_issues(history_id: int, db: Session = Depends(get_db), _:
 def get_import_history_unmatched_variants(
     history_id: int,
     db: Session = Depends(get_db),
-    _: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech])),
+    _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops])),
 ):
     history = db.get(ImportHistory, history_id)
     if not history:
@@ -2847,11 +2898,106 @@ def get_import_history_unmatched_variants(
     ]
 
 
+@app.get("/imports/history/{history_id}/batch-stats")
+def get_import_history_batch_stats(
+    history_id: int,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops])),
+):
+    history = db.get(ImportHistory, history_id)
+    if not history:
+        raise HTTPException(status_code=404, detail="导入历史不存在")
+    task_id = history.task_id
+    channel_names_db = set(db.scalars(select(Channel.name)).all())
+    game_names_db = set(db.scalars(select(Game.name)).all())
+    raw_rows = db.scalars(select(RawStatement).where(RawStatement.recon_task_id == task_id)).all()
+
+    ch_agg: dict[str, dict] = {}
+    game_agg: dict[str, dict] = {}
+    for r in raw_rows:
+        ch = r.channel_name or ""
+        gm = r.game_name or ""
+        ga = Decimal(str(r.gross_amount or 0))
+        if ch not in ch_agg:
+            ch_agg[ch] = {"row_count": 0, "gross_amount": Decimal("0")}
+        ch_agg[ch]["row_count"] += 1
+        ch_agg[ch]["gross_amount"] += ga
+        if gm not in game_agg:
+            game_agg[gm] = {"row_count": 0, "gross_amount": Decimal("0")}
+        game_agg[gm]["row_count"] += 1
+        game_agg[gm]["gross_amount"] += ga
+
+    by_channel = [
+        {"channel_name": k, "row_count": v["row_count"], "gross_amount": str(v["gross_amount"])}
+        for k, v in sorted(ch_agg.items(), key=lambda x: x[0])
+    ]
+    by_game = [
+        {"game_name": k, "row_count": v["row_count"], "gross_amount": str(v["gross_amount"])}
+        for k, v in sorted(game_agg.items(), key=lambda x: x[0])
+    ]
+
+    unmatched_channels = sorted({r.channel_name for r in raw_rows if r.channel_name and r.channel_name not in channel_names_db})
+    unmatched_games = sorted({r.game_name for r in raw_rows if r.game_name and r.game_name not in game_names_db})
+    mapping_issues = db.scalars(
+        select(ReconIssue).where(ReconIssue.recon_task_id == task_id, ReconIssue.issue_type == "mapping").order_by(ReconIssue.id.asc())
+    ).all()
+    unmapped_pairs = [x.detail for x in mapping_issues]
+    variant_stmt = (
+        select(
+            RawStatement.game_name,
+            func.count(RawStatement.id).label("cnt"),
+        )
+        .where(RawStatement.recon_task_id == task_id, RawStatement.variant_match_status == "未匹配版本")
+        .group_by(RawStatement.game_name)
+        .order_by(RawStatement.game_name.asc())
+    )
+    variant_rows = db.execute(variant_stmt).mappings().all()
+    variant_unmatched = [{"game_name": row["game_name"], "count": int(row["cnt"])} for row in variant_rows]
+
+    return {
+        "by_channel": by_channel,
+        "by_game": by_game,
+        "unique_channel_count": len(ch_agg),
+        "unique_game_count": len(game_agg),
+        "exceptions": {
+            "unmatched_channels": unmatched_channels,
+            "unmatched_games": unmatched_games,
+            "unmapped_pairs": unmapped_pairs,
+            "variant_unmatched": variant_unmatched,
+        },
+    }
+
+
+@app.get("/imports/history/{history_id}/raw-rows")
+def get_import_history_raw_rows(
+    history_id: int,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops])),
+):
+    history = db.get(ImportHistory, history_id)
+    if not history:
+        raise HTTPException(status_code=404, detail="导入历史不存在")
+    rows = db.scalars(select(RawStatement).where(RawStatement.recon_task_id == history.task_id).order_by(RawStatement.id.asc())).all()
+    return [
+        {
+            "id": r.id,
+            "channel_name": r.channel_name,
+            "game_name": r.game_name,
+            "period": r.period,
+            "gross_amount": str(r.gross_amount),
+            "variant_match_status": r.variant_match_status,
+            "project_name": r.project_name or "",
+            "variant_name": r.variant_name or "",
+        }
+        for r in rows
+    ]
+
+
 @app.post("/imports/history/{history_id}/rematch-variants")
 def rematch_import_history_variants(
     history_id: int,
     db: Session = Depends(get_db),
-    ctx: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech])),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops])),
 ):
     history = db.get(ImportHistory, history_id)
     if not history:

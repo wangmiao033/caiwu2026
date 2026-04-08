@@ -79,6 +79,7 @@ type ImportHistoryRow = {
   unmatched_variant_count?: number;
   unresolved_issue_count?: number;
   resolved_issue_count?: number;
+  task_status?: string;
 };
 
 type ImportHistoryListResp = {
@@ -86,6 +87,15 @@ type ImportHistoryListResp = {
   total: number;
   page: number;
   page_size: number;
+  summary?: {
+    batch_count: number;
+    total_import_rows: number;
+    valid_rows: number;
+    invalid_rows: number;
+    amount_sum: string;
+    matched_variant_rows: number;
+    unmatched_variant_rows: number;
+  };
 };
 
 type ImportHistoryFilter = {
@@ -770,7 +780,7 @@ export default function ImportPage() {
                     <Button onClick={downloadTemplateCsv}>下载 CSV 模板</Button>
                     <Button onClick={downloadTemplateXlsx}>下载 XLSX 模板</Button>
                     <Button onClick={exportExceptions}>异常导出</Button>
-                    <Button onClick={() => router.push("/recon-tasks")}>去核对任务页</Button>
+                    <Button onClick={() => router.push("/recon-tasks")}>去导入数据中心</Button>
                   </Space>
                   <Table
                     rowKey="key"
@@ -919,7 +929,7 @@ export default function ImportPage() {
                     <Button type="primary" onClick={submitManual}>
                       提交数据
                     </Button>
-                    <Button onClick={() => router.push("/recon-tasks")}>提交后去核对任务页</Button>
+                    <Button onClick={() => router.push("/recon-tasks")}>提交后去导入数据中心</Button>
                   </Space>
                   <Table
                     rowKey="key"
@@ -1067,7 +1077,7 @@ export default function ImportPage() {
                         <Button type="primary" onClick={confirmExtractImport}>
                           确认导入
                         </Button>
-                        <Button onClick={() => router.push("/recon-tasks")}>去核对任务页</Button>
+                        <Button onClick={() => router.push("/recon-tasks")}>去导入数据中心</Button>
                       </Space>
                     </Card>
                   )}
@@ -1179,7 +1189,7 @@ export default function ImportPage() {
                     value={issueStatusFilter || undefined}
                     onChange={(v) => setIssueStatusFilter(v || "")}
                   />
-                  <Button onClick={() => router.push(`/recon-tasks?task_id=${historyDetail.task_id}`)}>去核对任务</Button>
+                  <Button onClick={() => router.push(`/recon-tasks?task_id=${historyDetail.task_id}`)}>去导入数据中心</Button>
                   <Button type="primary" disabled={selectedIssueIds.length === 0} onClick={() => openResolveModal(selectedIssueIds)}>
                     批量标记已处理
                   </Button>

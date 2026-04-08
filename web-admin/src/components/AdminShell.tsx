@@ -34,7 +34,7 @@ const menuItems = [
   { key: "/game-variants", icon: <ApartmentOutlined />, label: "版本管理" },
   { key: "/channel-game-map", icon: <ClusterOutlined />, label: "渠道游戏映射" },
   { key: "/import", icon: <FileExcelOutlined />, label: "Excel导入" },
-  { key: "/recon-tasks", icon: <CheckCircleOutlined />, label: "核对任务" },
+  { key: "/recon-tasks", icon: <CheckCircleOutlined />, label: "导入数据中心" },
   { key: "/billing", icon: <ReconciliationOutlined />, label: "账单管理" },
   { key: "/billing-rules", icon: <SettingOutlined />, label: "规则配置" },
   { key: "/settlement-statements", icon: <ReconciliationOutlined />, label: "渠道结算对账单" },
