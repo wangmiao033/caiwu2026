@@ -11,6 +11,7 @@ import {
   Empty,
   Input,
   Modal,
+  notification,
   Row,
   Select,
   Space,
@@ -242,18 +243,32 @@ export default function ReconTasksPage() {
     }
   };
 
-  const confirmTask = (taskId: number) => {
+  const confirmTask = (taskId: number, period: string) => {
     Modal.confirm({
       title: "确认入账",
       content: `确认任务 ${taskId} 后将进入后续账单流程，建议先完成异常处理并复核后再确认。`,
       onOk: async () => {
         try {
           await apiRequest(`/recon/${taskId}/confirm`, "POST");
-          message.success("确认成功");
           await loadList();
           if (activeHistoryId && detail?.task_id === taskId) {
             const d = await apiRequest<ImportDetail>(`/imports/history/${activeHistoryId}`);
             setDetail(d);
+          }
+          const periodNorm = (period || "").trim();
+          if (periodNorm) {
+            notification.success({
+              message: "确认入账成功",
+              description: `账期 ${periodNorm} 已确认。可前往账单管理查看或生成该账期账单。`,
+              btn: (
+                <Button type="primary" size="small" onClick={() => router.push(`/billing?period=${encodeURIComponent(periodNorm)}`)}>
+                  去账单管理
+                </Button>
+              ),
+              duration: 10,
+            });
+          } else {
+            message.success("确认成功");
           }
         } catch (e) {
           message.error((e as Error).message);
@@ -665,7 +680,7 @@ export default function ReconTasksPage() {
                   size="small"
                   type="link"
                   disabled={r.task_status === "已确认" || r.lifecycle_status === "discarded"}
-                  onClick={() => confirmTask(r.task_id)}
+                  onClick={() => confirmTask(r.task_id, r.period)}
                 >
                   确认入账
                 </Button>
