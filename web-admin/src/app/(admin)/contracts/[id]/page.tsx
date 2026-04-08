@@ -2,29 +2,14 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import {
-  Button,
-  Card,
-  Descriptions,
-  Form,
-  Input,
-  InputNumber,
-  Modal,
-  Space,
-  Switch,
-  Table,
-  Tag,
-  Typography,
-  message,
-} from "antd";
+import { Button, Card, Descriptions, Space, Table, Tag, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import dayjs from "dayjs";
-import { ArrowLeftOutlined, PlusOutlined } from "@ant-design/icons";
+import { ArrowLeftOutlined, EditOutlined } from "@ant-design/icons";
 import { apiRequest } from "@/lib/api";
 import RoleGuard from "@/components/RoleGuard";
 import { hasRole } from "@/lib/rbac";
-
-type ContractStatus = "draft" | "active" | "expired" | "void";
+import { STATUS_LABEL, type ContractStatus } from "../types";
 
 type ContractItemRow = {
   id: number;
@@ -56,22 +41,12 @@ type ContractDetail = {
   items: ContractItemRow[];
 };
 
-const STATUS_LABEL: Record<ContractStatus, { text: string; color: string }> = {
-  draft: { text: "草稿", color: "default" },
-  active: { text: "生效", color: "green" },
-  expired: { text: "已到期", color: "orange" },
-  void: { text: "作废", color: "red" },
-};
-
 export default function ContractDetailPage() {
   const params = useParams();
   const router = useRouter();
   const id = Number(params.id);
   const [detail, setDetail] = useState<ContractDetail | null>(null);
   const [loading, setLoading] = useState(true);
-  const [itemOpen, setItemOpen] = useState(false);
-  const [editingItem, setEditingItem] = useState<ContractItemRow | null>(null);
-  const [itemForm] = Form.useForm();
   const canMutate = hasRole(["admin", "finance_manager", "tech"]);
 
   const load = useCallback(async () => {
@@ -92,91 +67,6 @@ export default function ContractDetailPage() {
     void load();
   }, [load]);
 
-  const openAddItem = () => {
-    if (!detail) return;
-    setEditingItem(null);
-    itemForm.resetFields();
-    itemForm.setFieldsValue({
-      game_name: "",
-      discount_label: "",
-      discount_rate: 0,
-      channel_share_percent: 0,
-      channel_fee_percent: 0,
-      tax_percent: 0,
-      private_percent: 0,
-      rd_share_note: "",
-      is_active: true,
-    });
-    setItemOpen(true);
-  };
-
-  const openEditItem = (row: ContractItemRow) => {
-    setEditingItem(row);
-    itemForm.setFieldsValue({
-      game_name: row.game_name,
-      discount_label: row.discount_label,
-      discount_rate: row.discount_rate,
-      channel_share_percent: row.channel_share_percent,
-      channel_fee_percent: row.channel_fee_percent,
-      tax_percent: row.tax_percent,
-      private_percent: row.private_percent,
-      rd_share_note: row.rd_share_note,
-      is_active: row.is_active,
-    });
-    setItemOpen(true);
-  };
-
-  const submitItem = async () => {
-    if (!detail) return;
-    let values: Record<string, unknown>;
-    try {
-      values = await itemForm.validateFields();
-    } catch {
-      return;
-    }
-    const payload = {
-      game_name: String(values.game_name || "").trim(),
-      discount_label: String(values.discount_label || "").trim(),
-      discount_rate: Number(values.discount_rate ?? 0),
-      channel_share_percent: Number(values.channel_share_percent ?? 0),
-      channel_fee_percent: Number(values.channel_fee_percent ?? 0),
-      tax_percent: Number(values.tax_percent ?? 0),
-      private_percent: Number(values.private_percent ?? 0),
-      rd_share_note: String(values.rd_share_note || "").trim(),
-      is_active: Boolean(values.is_active),
-    };
-    try {
-      if (editingItem) {
-        await apiRequest(`/contract-items/${editingItem.id}`, "PUT", payload);
-        message.success("明细已更新");
-      } else {
-        await apiRequest(`/contracts/${detail.id}/items`, "POST", payload);
-        message.success("明细已添加");
-      }
-      setItemOpen(false);
-      setEditingItem(null);
-      itemForm.resetFields();
-      void load();
-    } catch (e) {
-      message.error((e as Error).message);
-    }
-  };
-
-  const removeItem = (row: ContractItemRow) => {
-    Modal.confirm({
-      title: "删除该合同明细？",
-      onOk: async () => {
-        try {
-          await apiRequest(`/contract-items/${row.id}`, "DELETE");
-          message.success("已删除");
-          void load();
-        } catch (e) {
-          message.error((e as Error).message);
-        }
-      },
-    });
-  };
-
   const itemColumns: ColumnsType<ContractItemRow> = [
     { title: "游戏名称", dataIndex: "game_name", ellipsis: true },
     { title: "折扣说明", dataIndex: "discount_label", ellipsis: true, render: (v: string) => v || "—" },
@@ -186,27 +76,16 @@ export default function ContractDetailPage() {
     { title: "税点(%)", dataIndex: "tax_percent", width: 80 },
     { title: "私点(%)", dataIndex: "private_percent", width: 80 },
     {
+      title: "研发分成说明",
+      dataIndex: "rd_share_note",
+      ellipsis: true,
+      render: (v: string) => v || "—",
+    },
+    {
       title: "启用",
       dataIndex: "is_active",
       width: 80,
       render: (v: boolean) => <Tag color={v ? "green" : "default"}>{v ? "是" : "否"}</Tag>,
-    },
-    {
-      title: "操作",
-      width: 160,
-      render: (_, row) =>
-        canMutate ? (
-          <Space>
-            <Button type="link" size="small" onClick={() => openEditItem(row)}>
-              编辑
-            </Button>
-            <Button type="link" size="small" danger onClick={() => removeItem(row)}>
-              删除
-            </Button>
-          </Space>
-        ) : (
-          "—"
-        ),
     },
   ];
 
@@ -216,13 +95,18 @@ export default function ContractDetailPage() {
     <RoleGuard allow={["admin", "finance_manager", "tech", "ops_manager"]}>
       <Card loading={loading}>
         <Space direction="vertical" size={16} style={{ width: "100%" }}>
-          <Space>
+          <Space wrap>
             <Button icon={<ArrowLeftOutlined />} onClick={() => router.push("/contracts")}>
               返回列表
             </Button>
+            {detail && canMutate ? (
+              <Button type="primary" icon={<EditOutlined />} onClick={() => router.push(`/contracts/${detail.id}/edit`)}>
+                编辑合同
+              </Button>
+            ) : null}
           </Space>
           <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-            合同数据作为渠道签约依据归档；与线上「规则配置」「渠道-游戏映射」相互独立，后续版本可再做自动校验或同步。
+            合同数据作为渠道签约依据归档；与线上「规则配置」「渠道-游戏映射」相互独立。修改主档或明细请使用「编辑合同」进入独立录入页。
           </Typography.Paragraph>
           {detail ? (
             <>
@@ -251,22 +135,12 @@ export default function ContractDetailPage() {
                 <Descriptions.Item label="乙方地址" span={2}>
                   {detail.developer_party_address || "—"}
                 </Descriptions.Item>
-                <Descriptions.Item label="备注" span={2}>
+                <Descriptions.Item label="备注 / 来源" span={2}>
                   {detail.remark || "—"}
                 </Descriptions.Item>
               </Descriptions>
 
-              <Card
-                size="small"
-                title="合同明细（按游戏维度摘录条款）"
-                extra={
-                  canMutate ? (
-                    <Button type="primary" size="small" icon={<PlusOutlined />} onClick={openAddItem}>
-                      新增明细
-                    </Button>
-                  ) : null
-                }
-              >
+              <Card size="small" title="合同明细（只读）">
                 <Table
                   rowKey="id"
                   size="small"
@@ -280,52 +154,6 @@ export default function ContractDetailPage() {
             <Typography.Text type="secondary">未找到合同</Typography.Text>
           ) : null}
         </Space>
-        <Modal
-          title={editingItem ? "编辑明细" : "新增明细"}
-          open={itemOpen}
-          onCancel={() => {
-            setItemOpen(false);
-            setEditingItem(null);
-            itemForm.resetFields();
-          }}
-          onOk={() => void submitItem()}
-          width={560}
-          destroyOnClose
-        >
-          <Form form={itemForm} layout="vertical">
-            <Form.Item name="game_name" label="游戏名称" rules={[{ required: true }]}>
-              <Input placeholder="与主数据/导入 game_name 一致便于对照" />
-            </Form.Item>
-            <Form.Item name="discount_label" label="折扣标签">
-              <Input placeholder="如无/0.1折 等" />
-            </Form.Item>
-            <Form.Item name="discount_rate" label="折扣率(小数或比例，按需填写)">
-              <InputNumber style={{ width: "100%" }} min={0} step={0.0001} />
-            </Form.Item>
-            <Space wrap style={{ width: "100%" }}>
-              <Form.Item name="channel_share_percent" label="渠道分成(%)">
-                <InputNumber min={0} max={100} style={{ width: 160 }} />
-              </Form.Item>
-              <Form.Item name="channel_fee_percent" label="通道费(%)">
-                <InputNumber min={0} max={100} style={{ width: 160 }} />
-              </Form.Item>
-            </Space>
-            <Space wrap style={{ width: "100%" }}>
-              <Form.Item name="tax_percent" label="税点(%)">
-                <InputNumber min={0} max={100} style={{ width: 160 }} />
-              </Form.Item>
-              <Form.Item name="private_percent" label="私点(%)">
-                <InputNumber min={0} max={100} style={{ width: 160 }} />
-              </Form.Item>
-            </Space>
-            <Form.Item name="rd_share_note" label="研发分成说明">
-              <Input.TextArea rows={2} placeholder="如与研发分成相关的特别约定（不等同游戏主数据 rd_share）" />
-            </Form.Item>
-            <Form.Item name="is_active" label="启用" valuePropName="checked">
-              <Switch />
-            </Form.Item>
-          </Form>
-        </Modal>
       </Card>
     </RoleGuard>
   );
