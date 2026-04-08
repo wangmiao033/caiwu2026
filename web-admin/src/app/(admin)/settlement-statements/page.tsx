@@ -6,12 +6,17 @@ import {
   Alert,
   Button,
   Card,
+  Col,
   Descriptions,
+  Divider,
   Drawer,
   Empty,
   Input,
+  Row,
   Select,
   Space,
+  Spin,
+  Statistic,
   Table,
   Tag,
   Typography,
@@ -93,7 +98,15 @@ type PeriodReconciliationResp = {
   intro_note: string;
 };
 
-const PERIOD_YM = /^\d{4}-\d{2}$/;
+/** 将 2026-3、2026/03 等规范为 YYYY-MM；非法返回 null */
+function normalizePeriodYm(raw: string): string | null {
+  const t = raw.trim().replace(/\//g, "-");
+  const m = /^(\d{4})-(\d{1,2})$/.exec(t);
+  if (!m) return null;
+  const monthNum = parseInt(m[2], 10);
+  if (monthNum < 1 || monthNum > 12) return null;
+  return `${m[1]}-${String(monthNum).padStart(2, "0")}`;
+}
 
 function getDefaultPeriod(): string {
   const d = new Date();
@@ -118,13 +131,14 @@ function deltaBalanced(d: string): boolean {
 
 export default function SettlementStatementsPage() {
   const router = useRouter();
-  const [bridgePeriod, setBridgePeriod] = useState(getDefaultPeriod);
+  const defaultPeriod = useMemo(() => getDefaultPeriod(), []);
+  const [bridgePeriod, setBridgePeriod] = useState(defaultPeriod);
   const [bridgeKeyword, setBridgeKeyword] = useState("");
   const [reco, setReco] = useState<PeriodReconciliationResp | null>(null);
   const [recoLoading, setRecoLoading] = useState(false);
   const [recoError, setRecoError] = useState<string | null>(null);
 
-  const [stmtPeriod, setStmtPeriod] = useState("");
+  const [stmtPeriod, setStmtPeriod] = useState(defaultPeriod);
   const [channelId, setChannelId] = useState<number | undefined>(undefined);
   const [keyword, setKeyword] = useState("");
   const [channels, setChannels] = useState<ChannelOption[]>([]);
@@ -152,17 +166,12 @@ export default function SettlementStatementsPage() {
     }
   };
 
-  const loadReconciliation = useCallback(async () => {
-    const p = bridgePeriod.trim();
-    if (!PERIOD_YM.test(p)) {
-      message.warning("账期格式应为 YYYY-MM");
-      return;
-    }
+  const fetchReconciliation = useCallback(async (canonicalPeriod: string) => {
     setRecoLoading(true);
     setRecoError(null);
     try {
       const data = await apiRequest<PeriodReconciliationResp>(
-        `/settlement-statements/period-reconciliation?period=${encodeURIComponent(p)}`,
+        `/settlement-statements/period-reconciliation?period=${encodeURIComponent(canonicalPeriod)}`,
       );
       setReco(data);
     } catch (e) {
@@ -171,13 +180,49 @@ export default function SettlementStatementsPage() {
     } finally {
       setRecoLoading(false);
     }
-  }, [bridgePeriod]);
+  }, []);
+
+  useEffect(() => {
+    const raw = bridgePeriod.trim();
+    if (!raw) {
+      setReco(null);
+      setRecoError(null);
+      setRecoLoading(false);
+      return;
+    }
+    const p = normalizePeriodYm(raw);
+    if (!p) {
+      setReco(null);
+      setRecoError(null);
+      setRecoLoading(false);
+      return;
+    }
+    if (p !== raw) {
+      setBridgePeriod(p);
+      return;
+    }
+    void fetchReconciliation(p);
+  }, [bridgePeriod, fetchReconciliation]);
+
+  const refreshBridge = () => {
+    const raw = bridgePeriod.trim();
+    const p = normalizePeriodYm(raw);
+    if (!p) {
+      message.warning("账期格式应为 YYYY-MM（月份可写 1–12，将自动补为两位数）");
+      return;
+    }
+    if (p !== raw) setBridgePeriod(p);
+    else void fetchReconciliation(p);
+  };
 
   const loadList = async () => {
     setLoading(true);
     try {
       const p = new URLSearchParams();
-      if (stmtPeriod) p.set("period", stmtPeriod);
+      if (stmtPeriod.trim()) {
+        const sp = normalizePeriodYm(stmtPeriod.trim());
+        p.set("period", sp ?? stmtPeriod.trim());
+      }
       if (channelId) p.set("channel_id", String(channelId));
       if (keyword.trim()) p.set("keyword", keyword.trim());
       p.set("status", "generated");
@@ -193,13 +238,8 @@ export default function SettlementStatementsPage() {
   useEffect(() => {
     void loadChannels();
     void loadList();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅挂载时拉取对账单列表
   }, []);
-
-  useEffect(() => {
-    if (PERIOD_YM.test(bridgePeriod.trim())) {
-      void loadReconciliation();
-    }
-  }, [bridgePeriod, loadReconciliation]);
 
   const exportBridge = () => {
     if (!reco) {
@@ -248,16 +288,18 @@ export default function SettlementStatementsPage() {
 
   const generateOne = async (overwrite = false) => {
     if (!canOperate) return;
-    if (!stmtPeriod) {
-      message.error("请先输入账期，例如 2026-04");
+    const sn = normalizePeriodYm(stmtPeriod.trim());
+    if (!sn) {
+      message.error("账期格式应为 YYYY-MM，例如 2026-04");
       return;
     }
+    if (sn !== stmtPeriod.trim()) setStmtPeriod(sn);
     if (!channelId) {
       message.error("请先选择渠道");
       return;
     }
     try {
-      await apiRequest("/settlement-statements/generate", "POST", { period: stmtPeriod, channel_id: channelId, overwrite });
+      await apiRequest("/settlement-statements/generate", "POST", { period: sn, channel_id: channelId, overwrite });
       message.success(overwrite ? "已覆盖重生成" : "生成成功");
       loadList();
     } catch (e) {
@@ -316,49 +358,91 @@ export default function SettlementStatementsPage() {
   };
 
   const s = reco?.summary;
+  const billingPeriodParam = normalizePeriodYm(bridgePeriod.trim()) ?? bridgePeriod.trim();
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
       <Alert
         type="info"
         showIcon
-        message='渠道结算对账单管理 / 核对桥接'
+        message="渠道结算对账单管理 / 核对桥接（默认主页）"
         description={
           <div>
             <p style={{ marginBottom: 8 }}>
-              <strong>本页用于核对「导入原始流水 gross」与「账单拆分结果」</strong>（渠道应结、研发应结、发行/保留），数据与账单管理页的生成逻辑一致，且仅基于该账期<strong>唯一有效已确认</strong>导入批次。
+              <strong>进入本页后，下方首先就是「账期核对桥接」</strong>：展示该账期在<strong>唯一有效已确认</strong>导入批次下的
+              <strong>原始流水、渠道拆分、研发拆分、保留金额与差额</strong>，并与账单管理中的拆分逻辑一致。
             </p>
             <Typography.Text type="secondary">
-              导入批次与原始流水请看「导入数据中心」；账单状态、发送与回款请看「账单管理」——账期级流水核对请在本页完成。
+              导入原始流水批次请至「导入数据中心」；账单发送与回款请至「账单管理」（不承担与导入流水的对账展示）。
+              账期统一为 <strong>YYYY-MM</strong>（如 2026-03）；输入 <strong>2026-3</strong> 会自动规范为 <strong>2026-03</strong> 再请求。
             </Typography.Text>
           </div>
         }
       />
 
       <Card
-        title="账期核对桥接（按渠道）"
+        title="账期核对桥接（默认主页 · 按渠道明细）"
         extra={
           <Space wrap>
-            <Input placeholder="账期 YYYY-MM" value={bridgePeriod} onChange={(e) => setBridgePeriod(e.target.value)} style={{ width: 120 }} />
+            <Input
+              placeholder="账期 YYYY-MM"
+              value={bridgePeriod}
+              onChange={(e) => setBridgePeriod(e.target.value)}
+              onBlur={() => {
+                const n = normalizePeriodYm(bridgePeriod.trim());
+                if (n) setBridgePeriod(n);
+              }}
+              style={{ width: 130 }}
+            />
             <Input placeholder="按渠道名称筛选" value={bridgeKeyword} onChange={(e) => setBridgeKeyword(e.target.value)} style={{ width: 160 }} />
-            <Button type="primary" loading={recoLoading} onClick={() => void loadReconciliation()}>
+            <Button type="primary" loading={recoLoading} onClick={refreshBridge}>
               刷新核对
             </Button>
             <Button disabled={!reco} onClick={exportBridge}>
               导出核对 Excel
             </Button>
-            <Button onClick={() => router.push(`/billing?period=${encodeURIComponent(bridgePeriod.trim())}`)}>打开账单管理</Button>
+            <Button onClick={() => router.push(`/billing?period=${encodeURIComponent(billingPeriodParam)}`)}>打开账单管理</Button>
           </Space>
         }
       >
-        {recoError ? (
+        {recoLoading && !reco ? (
+          <div style={{ padding: 48, textAlign: "center" }}>
+            <Spin size="large" tip="加载账期桥接汇总…" />
+          </div>
+        ) : recoError ? (
           <Alert type="warning" showIcon message="无法加载核对数据" description={recoError} />
         ) : !reco ? (
-          <Empty description={recoLoading ? "加载中…" : "请输入合法账期"} />
+          <Empty description="请输入或选择合法账期（YYYY-MM）" />
         ) : (
           <Space direction="vertical" size={16} style={{ width: "100%" }}>
+            <Typography.Title level={5} style={{ marginTop: 0 }}>
+              账期桥接总览
+            </Typography.Title>
+            <Row gutter={[16, 16]}>
+              <Col xs={24} sm={12} md={8} lg={6}>
+                <Statistic title="导入原始流水总额" value={Number(s?.total_import_gross ?? 0)} precision={2} groupSeparator="," />
+              </Col>
+              <Col xs={24} sm={12} md={8} lg={6}>
+                <Statistic title="渠道拆分应结合计" value={Number(s?.channel_split_total ?? 0)} precision={2} groupSeparator="," />
+              </Col>
+              <Col xs={24} sm={12} md={8} lg={6}>
+                <Statistic title="研发拆分应结合计" value={Number(s?.rd_split_total ?? 0)} precision={2} groupSeparator="," />
+              </Col>
+              <Col xs={24} sm={12} md={8} lg={6}>
+                <Statistic title="发行/保留合计" value={Number(s?.publisher_retention_total ?? 0)} precision={2} groupSeparator="," />
+              </Col>
+              <Col xs={24} sm={12} md={8} lg={6}>
+                <Statistic
+                  title="差额（校验）"
+                  value={Number(s?.balance_delta ?? 0)}
+                  precision={2}
+                  groupSeparator=","
+                  valueStyle={deltaBalanced(s?.balance_delta ?? "0") ? { color: "#3f8600" } : { color: "#cf1322" }}
+                />
+              </Col>
+            </Row>
             <Typography.Text type="secondary">{reco.intro_note}</Typography.Text>
-            <Descriptions bordered size="small" column={{ xs: 1, sm: 2, md: 3 }} title="账期总桥接汇总">
+            <Descriptions bordered size="small" column={{ xs: 1, sm: 2, md: 3 }} title="账期总桥接汇总（明细项）">
               <Descriptions.Item label="核对任务 ID">{reco.recon_task_id}</Descriptions.Item>
               <Descriptions.Item label="原始行数 / 未映射行">{s?.raw_row_count} / {s?.unmapped_row_count}</Descriptions.Item>
               <Descriptions.Item label="未映射流水金额">{amount(s?.unmapped_gross)}</Descriptions.Item>
@@ -416,11 +500,22 @@ export default function SettlementStatementsPage() {
         )}
       </Card>
 
+      <Divider plain>以下为可选功能（对账单文档生成，不替代上方桥接核对）</Divider>
+
       <Card
-        title="渠道对账单文档（按渠道生成 Excel）"
+        title="按渠道生成对账单 Excel 文档（可选 · 下沉）"
         extra={
           <Space wrap>
-            <Input placeholder="账期 YYYY-MM" value={stmtPeriod} onChange={(e) => setStmtPeriod(e.target.value)} style={{ width: 140 }} />
+            <Input
+              placeholder="账期 YYYY-MM"
+              value={stmtPeriod}
+              onChange={(e) => setStmtPeriod(e.target.value)}
+              onBlur={() => {
+                const n = normalizePeriodYm(stmtPeriod.trim());
+                if (n) setStmtPeriod(n);
+              }}
+              style={{ width: 140 }}
+            />
             <Select allowClear placeholder="选择渠道" style={{ width: 220 }} value={channelId} onChange={(v) => setChannelId(v)} options={channelOptions} />
             <Input placeholder="渠道名搜索" value={keyword} onChange={(e) => setKeyword(e.target.value)} style={{ width: 180 }} />
             <Button onClick={loadList}>查询</Button>

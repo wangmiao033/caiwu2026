@@ -3257,6 +3257,18 @@ def _ensure_period_format(period: str):
         raise HTTPException(status_code=400, detail="period 格式非法，应为 YYYY-MM") from e
 
 
+def _normalize_period_yyyymm(period: str) -> str:
+    """接受 2026-3、2026/03、2026-03 等，统一为与库内一致的 YYYY-MM。"""
+    raw = (period or "").strip().replace("/", "-")
+    m = re.match(r"^(\d{4})-(\d{1,2})$", raw)
+    if not m:
+        raise HTTPException(status_code=400, detail="账期格式应为 YYYY-MM，例如 2026-03")
+    y, mo = m.group(1), int(m.group(2))
+    if mo < 1 or mo > 12:
+        raise HTTPException(status_code=400, detail="账期月份应在 1–12 之间")
+    return f"{y}-{mo:02d}"
+
+
 def _build_settlement_snapshot(db: Session, period: str, channel_id: int) -> tuple[Channel, dict[int, dict], Decimal, Decimal, Decimal, Decimal, Decimal]:
     _ensure_period_format(period)
     channel = db.get(Channel, channel_id)
@@ -3781,7 +3793,7 @@ def get_settlement_period_reconciliation(
     db: Session = Depends(get_db),
     _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops])),
 ):
-    period = (period or "").strip()
+    period = _normalize_period_yyyymm(period)
     task_ids = _active_confirmed_recon_task_ids_for_billing(db, period)
     if len(task_ids) > 1:
         raise HTTPException(status_code=400, detail=BILLING_PERIOD_MULTI_ACTIVE_CONFIRMED_IMPORTS)
