@@ -10,10 +10,10 @@ import { apiRequest } from "@/lib/api";
 import RoleGuard from "@/components/RoleGuard";
 import ContractItemsEditor from "../ContractItemsEditor";
 import {
-  STATUS_OPTIONS,
+  STORED_STATUS_OPTIONS,
   toApiItemPayload,
   validateContractItemsForSave,
-  type ContractStatus,
+  type ContractStoredStatus,
   type LocalContractItem,
 } from "../types";
 
@@ -44,7 +44,7 @@ export default function ContractNewPage() {
       developer_party_address: String(values.developer_party_address || "").trim(),
       start_date: start.format("YYYY-MM-DD"),
       end_date: end.format("YYYY-MM-DD"),
-      status: values.status as ContractStatus,
+      status: values.status as ContractStoredStatus,
       remark: String(values.remark || "").trim(),
     };
     if (!payload.contract_no || !payload.contract_name || !payload.channel_name) {
@@ -100,7 +100,7 @@ export default function ContractNewPage() {
           layout="vertical"
           initialValues={{
             platform_party_name: "广州熊动科技有限公司",
-            status: "draft" satisfies ContractStatus,
+            status: "draft" satisfies ContractStoredStatus,
             start_date: dayjs(),
             end_date: dayjs().add(1, "year"),
           }}
@@ -135,7 +135,7 @@ export default function ContractNewPage() {
                 <DatePicker style={{ width: 200 }} />
               </Form.Item>
               <Form.Item name="status" label="状态" rules={[{ required: true }]}>
-                <Select options={STATUS_OPTIONS} style={{ width: 160 }} />
+                <Select options={STORED_STATUS_OPTIONS} style={{ width: 160 }} />
               </Form.Item>
             </Space>
           </Card>

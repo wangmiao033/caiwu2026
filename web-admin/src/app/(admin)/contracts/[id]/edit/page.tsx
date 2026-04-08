@@ -10,10 +10,10 @@ import { apiRequest } from "@/lib/api";
 import RoleGuard from "@/components/RoleGuard";
 import ContractItemsEditor from "../../ContractItemsEditor";
 import {
-  STATUS_OPTIONS,
+  STORED_STATUS_OPTIONS,
   toApiItemPayload,
   validateContractItemsForSave,
-  type ContractStatus,
+  type ContractStoredStatus,
   type LocalContractItem,
 } from "../../types";
 
@@ -44,7 +44,8 @@ type ContractDetail = {
   developer_party_address: string;
   start_date: string | null;
   end_date: string | null;
-  status: ContractStatus;
+  stored_status?: ContractStoredStatus;
+  status?: string;
   remark: string;
   items: ContractItemRow[];
 };
@@ -95,7 +96,7 @@ export default function ContractEditPage() {
         developer_party_address: data.developer_party_address || "",
         start_date: data.start_date ? dayjs(data.start_date) : null,
         end_date: data.end_date ? dayjs(data.end_date) : null,
-        status: data.status,
+        status: (data.stored_status as ContractStoredStatus) || "draft",
         remark: data.remark || "",
       });
       setItems(mapServerItemsToLocal(data.items || [], data.channel_name || ""));
@@ -143,7 +144,7 @@ export default function ContractEditPage() {
       developer_party_address: String(values.developer_party_address || "").trim(),
       start_date: start.format("YYYY-MM-DD"),
       end_date: end.format("YYYY-MM-DD"),
-      status: values.status as ContractStatus,
+      status: values.status as ContractStoredStatus,
       remark: String(values.remark || "").trim(),
     };
     const ive = validateContractItemsForSave(items);
@@ -236,7 +237,7 @@ export default function ContractEditPage() {
                   <DatePicker style={{ width: 200 }} />
                 </Form.Item>
                 <Form.Item name="status" label="状态" rules={[{ required: true }]}>
-                  <Select options={STATUS_OPTIONS} style={{ width: 160 }} />
+                  <Select options={STORED_STATUS_OPTIONS} style={{ width: 160 }} />
                 </Form.Item>
               </Space>
             </Card>

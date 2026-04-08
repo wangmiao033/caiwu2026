@@ -1,16 +1,58 @@
-export type ContractStatus = "draft" | "active" | "expired" | "void";
+/** 数据库存储状态（编辑主档时使用） */
+export type ContractStoredStatus = "draft" | "active" | "terminated" | "archived";
 
-export const STATUS_LABEL: Record<ContractStatus, { text: string; color: string }> = {
+/** 列表/详情展示状态（后端根据日期 + 存储状态计算） */
+export type ContractEffectiveStatus =
+          | "draft"
+          | "active"
+          | "expiring_soon"
+          | "expired"
+          | "pending_start"
+          | "terminated"
+          | "archived";
+
+export const EFFECTIVE_STATUS_LABEL: Record<
+  ContractEffectiveStatus,
+            { text: string; color: string }
+> = {
   draft: { text: "草稿", color: "default" },
   active: { text: "生效", color: "green" },
-  expired: { text: "已到期", color: "orange" },
-  void: { text: "作废", color: "red" },
+  expiring_soon: { text: "即将到期", color: "orange" },
+  expired: { text: "已过期", color: "volcano" },
+  pending_start: { text: "待生效", color: "blue" },
+  terminated: { text: "已终止", color: "red" },
+  archived: { text: "已归档", color: "purple" },
 };
 
-export const STATUS_OPTIONS = (Object.keys(STATUS_LABEL) as ContractStatus[]).map((v) => ({
-  label: STATUS_LABEL[v].text,
+export const EFFECTIVE_STATUS_FILTER_OPTIONS = (
+  Object.keys(EFFECTIVE_STATUS_LABEL) as ContractEffectiveStatus[]
+).map((v) => ({
+  label: EFFECTIVE_STATUS_LABEL[v].text,
   value: v,
 }));
+
+export const STORED_STATUS_OPTIONS: { label: string; value: ContractStoredStatus }[] = [
+  { label: "草稿", value: "draft" },
+  { label: "生效", value: "active" },
+  { label: "已终止", value: "terminated" },
+  { label: "已归档", value: "archived" },
+];
+
+/** @deprecated 使用 ContractStoredStatus / ContractEffectiveStatus */
+export type ContractStatus = ContractStoredStatus;
+
+export const STATUS_LABEL = {
+  draft: EFFECTIVE_STATUS_LABEL.draft,
+  active: EFFECTIVE_STATUS_LABEL.active,
+  terminated: EFFECTIVE_STATUS_LABEL.terminated,
+  archived: EFFECTIVE_STATUS_LABEL.archived,
+  expired: EFFECTIVE_STATUS_LABEL.expired,
+  void: EFFECTIVE_STATUS_LABEL.archived,
+} as const;
+
+export const STATUS_OPTIONS = STORED_STATUS_OPTIONS;
+
+export const STATUS_LABEL_FOR_EFFECTIVE = EFFECTIVE_STATUS_LABEL;
 
 /** 页面内编辑用的合同明细行（含本地 key；id 为空表示待创建） */
 export type LocalContractItem = {
@@ -66,7 +108,6 @@ export function toApiItemPayload(row: LocalContractItem) {
   };
 }
 
-/** 保存前校验（用于前端提示，与后端规则对齐） */
 export function validateContractItemsForSave(rows: LocalContractItem[]): string[] {
   const err: string[] = [];
   rows.forEach((r, idx) => {
@@ -92,7 +133,6 @@ export function validateContractItemsForSave(rows: LocalContractItem[]): string[
   return err;
 }
 
-/** 明细完整度提示（不替代保存校验） */
 export function contractItemsCompletenessHints(items: LocalContractItem[]): string[] {
   const active = items.filter((i) => i.is_active);
   if (active.length === 0) return ["暂无启用中的明细，保存前请确认是否需补充。"];

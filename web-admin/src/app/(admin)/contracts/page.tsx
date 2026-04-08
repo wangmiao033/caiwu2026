@@ -8,7 +8,12 @@ import { FileExcelOutlined, PlusOutlined } from "@ant-design/icons";
 import { apiRequest } from "@/lib/api";
 import RoleGuard from "@/components/RoleGuard";
 import { hasRole } from "@/lib/rbac";
-import { STATUS_LABEL, type ContractStatus } from "./types";
+import {
+  EFFECTIVE_STATUS_FILTER_OPTIONS,
+  EFFECTIVE_STATUS_LABEL,
+  type ContractEffectiveStatus,
+  type ContractStoredStatus,
+} from "./types";
 
 type ContractHeaderRow = {
   id: number;
@@ -21,23 +26,21 @@ type ContractHeaderRow = {
   developer_party_address?: string;
   start_date: string | null;
   end_date: string | null;
-  status: ContractStatus;
+  status: ContractEffectiveStatus;
+  days_to_end?: number | null;
+  expiry_reminder?: string;
+  stored_status?: ContractStoredStatus;
   remark?: string;
   created_at?: string;
   updated_at?: string;
 };
-
-const STATUS_OPTIONS = (Object.keys(STATUS_LABEL) as ContractStatus[]).map((v) => ({
-  label: STATUS_LABEL[v].text,
-  value: v,
-}));
 
 export default function ContractsListPage() {
   const router = useRouter();
   const [rows, setRows] = useState<ContractHeaderRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [channelQ, setChannelQ] = useState("");
-  const [statusQ, setStatusQ] = useState<ContractStatus | undefined>(undefined);
+  const [statusQ, setStatusQ] = useState<ContractEffectiveStatus | undefined>(undefined);
   const canMutate = hasRole(["admin", "finance_manager", "tech"]);
 
   const load = useCallback(async () => {
@@ -60,6 +63,19 @@ export default function ContractsListPage() {
     void load();
   }, [load]);
 
+  const doLifecycle = useCallback(
+    async (cid: number, action: string) => {
+      try {
+        await apiRequest(`/contracts/${cid}/lifecycle`, "POST", { action });
+        message.success("状态已更新");
+        void load();
+      } catch (e) {
+        message.error((e as Error).message);
+      }
+    },
+    [load]
+  );
+
   const columns: ColumnsType<ContractHeaderRow> = useMemo(
     () => [
       { title: "合同编号", dataIndex: "contract_no", width: 140, ellipsis: true },
@@ -78,16 +94,33 @@ export default function ContractsListPage() {
         title: "状态",
         dataIndex: "status",
         width: 100,
-        render: (s: ContractStatus) => {
-          const x = STATUS_LABEL[s] || { text: s, color: "default" };
+        render: (s: ContractEffectiveStatus) => {
+          const x = EFFECTIVE_STATUS_LABEL[s as ContractEffectiveStatus] || { text: s, color: "default" };
           return <Tag color={x.color}>{x.text}</Tag>;
         },
       },
       {
+        title: "到期提醒",
+        width: 140,
+        ellipsis: true,
+        render: (_, r) => r.expiry_reminder || "—",
+      },
+      {
+        title: "剩余天数",
+        width: 96,
+        render: (_, r) => {
+          const d = r.days_to_end;
+          if (d == null) return "—";
+          if (d < 0) return `已超 ${-d} 天`;
+          if (d === 0) return "今天";
+          return `${d} 天`;
+        },
+      },
+      {
         title: "操作",
-        width: 200,
+        width: 320,
         render: (_, r) => (
-          <Space>
+          <Space wrap size={0}>
             <Button type="link" size="small" onClick={() => router.push(`/contracts/${r.id}`)}>
               查看
             </Button>
@@ -96,11 +129,31 @@ export default function ContractsListPage() {
                 编辑
               </Button>
             ) : null}
+            {canMutate && r.stored_status === "draft" ? (
+              <Button type="link" size="small" onClick={() => void doLifecycle(r.id, "activate")}>
+                生效
+              </Button>
+            ) : null}
+            {canMutate && r.stored_status === "active" ? (
+              <Button type="link" size="small" danger onClick={() => void doLifecycle(r.id, "terminate")}>
+                终止
+              </Button>
+            ) : null}
+            {canMutate && r.stored_status === "terminated" ? (
+              <Button type="link" size="small" onClick={() => void doLifecycle(r.id, "archive")}>
+                归档
+              </Button>
+            ) : null}
+            {canMutate && (r.stored_status === "terminated" || r.stored_status === "archived") ? (
+              <Button type="link" size="small" onClick={() => void doLifecycle(r.id, "restore_active")}>
+                恢复生效
+              </Button>
+            ) : null}
           </Space>
         ),
       },
     ],
-    [canMutate, router]
+    [canMutate, router, doLifecycle]
   );
 
   return (
@@ -135,9 +188,9 @@ export default function ContractsListPage() {
           />
           <Select
             allowClear
-            placeholder="合同状态"
+            placeholder="展示状态筛选"
             style={{ width: 140 }}
-            options={STATUS_OPTIONS}
+            options={EFFECTIVE_STATUS_FILTER_OPTIONS}
             value={statusQ}
             onChange={(v) => setStatusQ(v)}
           />

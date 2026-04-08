@@ -468,8 +468,8 @@ class ExceptionHandleRecord(Base):
 class ContractStatus(str, enum.Enum):
     draft = "draft"
     active = "active"
-    expired = "expired"
-    void = "void"
+    terminated = "terminated"
+    archived = "archived"
 
 
 class ContractHeader(Base):
@@ -600,6 +600,12 @@ class ContractHeaderIn(BaseModel):
     end_date: dt.date
     status: ContractStatus = ContractStatus.draft
     remark: str = ""
+
+
+class ContractLifecycleIn(BaseModel):
+    """activate | terminate | archive | restore_active | restore_draft"""
+
+    action: str
 
 
 class ContractItemIn(BaseModel):
@@ -1199,6 +1205,19 @@ def ensure_contract_item_extra_columns():
         pass
 
 
+def ensure_contract_lifecycle_status_migration():
+    """旧版 contract_headers.status：void→archived，expired→terminated。"""
+    inspector = inspect(engine)
+    if "contract_headers" not in inspector.get_table_names():
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE contract_headers SET status = 'archived' WHERE status IN ('void','VOID')"))
+            conn.execute(text("UPDATE contract_headers SET status = 'terminated' WHERE status IN ('expired','EXPIRED')"))
+    except Exception:
+        pass
+
+
 def ensure_contract_tables():
     """兼容旧库：补建 channel 合同表（create_all 通常为幂等，此处再保底一次）。"""
     try:
@@ -1207,6 +1226,7 @@ def ensure_contract_tables():
     except Exception:
         pass
     ensure_contract_item_extra_columns()
+    ensure_contract_lifecycle_status_migration()
 
 
 app = FastAPI(title="内部对账系统", version="1.0.0")
@@ -1403,6 +1423,48 @@ def _contract_status_value(s: ContractStatus | str) -> str:
     return str(s)
 
 
+def _contract_effective_meta(h: ContractHeader, today: Optional[dt.date] = None) -> dict:
+    """基于存储状态 + 自然日计算对外展示状态与到期提醒（以后端口径为准）。"""
+    today = today or dt.date.today()
+    st = h.status
+    sd, ed = h.start_date, h.end_date
+    days_to_end: Optional[int] = int((ed - today).days) if ed else None
+
+    if st == ContractStatus.archived:
+        return {"effective_status": "archived", "days_to_end": days_to_end, "expiry_reminder": ""}
+    if st == ContractStatus.terminated:
+        return {"effective_status": "terminated", "days_to_end": days_to_end, "expiry_reminder": ""}
+    if st == ContractStatus.draft:
+        return {"effective_status": "draft", "days_to_end": days_to_end, "expiry_reminder": ""}
+
+    if ed and ed < today:
+        return {"effective_status": "expired", "days_to_end": days_to_end, "expiry_reminder": "已过期"}
+    if sd and sd > today:
+        d0 = (sd - today).days
+        return {
+            "effective_status": "pending_start",
+            "days_to_end": days_to_end,
+            "expiry_reminder": f"距开始还有 {d0} 天",
+        }
+    if days_to_end is None:
+        return {"effective_status": "active", "days_to_end": None, "expiry_reminder": ""}
+    if days_to_end == 0:
+        return {"effective_status": "expiring_soon", "days_to_end": 0, "expiry_reminder": "今天到期"}
+    if 1 <= days_to_end <= 30:
+        return {
+            "effective_status": "expiring_soon",
+            "days_to_end": days_to_end,
+            "expiry_reminder": f"{days_to_end}天后到期",
+        }
+    if days_to_end > 30:
+        return {
+            "effective_status": "active",
+            "days_to_end": days_to_end,
+            "expiry_reminder": f"还剩 {days_to_end} 天",
+        }
+    return {"effective_status": "active", "days_to_end": days_to_end, "expiry_reminder": ""}
+
+
 def _assert_contract_item_payload(payload: ContractItemIn) -> tuple[str, str]:
     gm = (payload.game_name or "").strip()
     ch = (payload.channel_name or "").strip()
@@ -1445,6 +1507,7 @@ def _contract_item_dict(it: ContractItem) -> dict:
 
 
 def _contract_header_dict(h: ContractHeader, include_items: bool) -> dict:
+    meta = _contract_effective_meta(h)
     d: dict = {
         "id": h.id,
         "contract_no": h.contract_no,
@@ -1456,7 +1519,11 @@ def _contract_header_dict(h: ContractHeader, include_items: bool) -> dict:
         "developer_party_address": h.developer_party_address or "",
         "start_date": h.start_date.isoformat() if h.start_date else None,
         "end_date": h.end_date.isoformat() if h.end_date else None,
-        "status": _contract_status_value(h.status),
+        "stored_status": _contract_status_value(h.status),
+        "status": meta["effective_status"],
+        "effective_status": meta["effective_status"],
+        "days_to_end": meta["days_to_end"],
+        "expiry_reminder": meta["expiry_reminder"],
         "remark": h.remark or "",
         "created_at": str(h.created_at) if h.created_at else "",
         "updated_at": str(h.updated_at) if h.updated_at else "",
@@ -1474,15 +1541,40 @@ def list_contracts(
     db: Session = Depends(get_db),
     _: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech, Role.ops])),
 ):
+    today = dt.date.today()
     stmt = select(ContractHeader).order_by(ContractHeader.id.desc())
     if channel and channel.strip():
         stmt = stmt.where(ContractHeader.channel_name.contains(channel.strip()))
-    if status and status.strip():
-        try:
-            st = ContractStatus(status.strip())
-            stmt = stmt.where(ContractHeader.status == st)
-        except ValueError:
-            pass
+    ef = (status or "").strip()
+    if ef == "draft":
+        stmt = stmt.where(ContractHeader.status == ContractStatus.draft)
+    elif ef == "terminated":
+        stmt = stmt.where(ContractHeader.status == ContractStatus.terminated)
+    elif ef == "archived":
+        stmt = stmt.where(ContractHeader.status == ContractStatus.archived)
+    elif ef == "active":
+        stmt = stmt.where(
+            ContractHeader.status == ContractStatus.active,
+            ContractHeader.start_date <= today,
+            ContractHeader.end_date > today + dt.timedelta(days=30),
+        )
+    elif ef == "expiring_soon":
+        stmt = stmt.where(
+            ContractHeader.status == ContractStatus.active,
+            ContractHeader.start_date <= today,
+            ContractHeader.end_date >= today,
+            ContractHeader.end_date <= today + dt.timedelta(days=30),
+        )
+    elif ef == "expired":
+        stmt = stmt.where(
+            ContractHeader.status == ContractStatus.active,
+            ContractHeader.end_date < today,
+        )
+    elif ef == "pending_start":
+        stmt = stmt.where(
+            ContractHeader.status == ContractStatus.active,
+            ContractHeader.start_date > today,
+        )
     rows = db.scalars(stmt).all()
     return [_contract_header_dict(r, False) for r in rows]
 
@@ -1569,6 +1661,57 @@ def update_contract(
     row.remark = (payload.remark or "").strip()
     row.updated_at = dt.datetime.now()
     write_system_audit(db, ctx["user"], "update_contract", "contract_header", str(row.id), f"更新合同: {row.contract_no}")
+    db.commit()
+    db.refresh(row)
+    return _contract_header_dict(row, True)
+
+
+@app.post("/contracts/{contract_id}/lifecycle")
+def contract_lifecycle(
+    contract_id: int,
+    payload: ContractLifecycleIn,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech])),
+):
+    row = db.get(ContractHeader, contract_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="合同不存在")
+    act = (payload.action or "").strip().lower()
+    if act == "activate":
+        if row.status != ContractStatus.draft:
+            raise HTTPException(status_code=400, detail="仅草稿可设为生效")
+        row.status = ContractStatus.active
+    elif act == "terminate":
+        if row.status != ContractStatus.active:
+            raise HTTPException(status_code=400, detail="仅生效中的合同可终止")
+        row.status = ContractStatus.terminated
+    elif act == "archive":
+        if row.status != ContractStatus.terminated:
+            raise HTTPException(status_code=400, detail="仅已终止的合同可归档")
+        row.status = ContractStatus.archived
+    elif act == "restore_active":
+        if row.status not in (ContractStatus.terminated, ContractStatus.archived):
+            raise HTTPException(status_code=400, detail="仅已终止或已归档的合同可恢复为生效")
+        row.status = ContractStatus.active
+    elif act == "restore_draft":
+        if row.status not in (
+            ContractStatus.active,
+            ContractStatus.terminated,
+            ContractStatus.archived,
+        ):
+            raise HTTPException(status_code=400, detail="当前状态无法恢复为草稿")
+        row.status = ContractStatus.draft
+    else:
+        raise HTTPException(status_code=400, detail="未知操作：activate | terminate | archive | restore_active | restore_draft")
+    row.updated_at = dt.datetime.now()
+    write_system_audit(
+        db,
+        ctx["user"],
+        "contract_lifecycle",
+        "contract_header",
+        str(row.id),
+        f"合同状态流转: {act} -> {row.status.value}",
+    )
     db.commit()
     db.refresh(row)
     return _contract_header_dict(row, True)

@@ -11,11 +11,12 @@ import RoleGuard from "@/components/RoleGuard";
 import { hasRole } from "@/lib/rbac";
 import ContractItemsEditor from "../ContractItemsEditor";
 import {
-  STATUS_LABEL,
+  EFFECTIVE_STATUS_LABEL,
   contractItemsCompletenessHints,
   toApiItemPayload,
   validateContractItemsForSave,
-  type ContractStatus,
+  type ContractEffectiveStatus,
+  type ContractStoredStatus,
   type LocalContractItem,
 } from "../types";
 
@@ -46,7 +47,11 @@ type ContractDetail = {
   developer_party_address: string;
   start_date: string | null;
   end_date: string | null;
-  status: ContractStatus;
+  status: ContractEffectiveStatus;
+  stored_status?: ContractStoredStatus;
+  effective_status?: ContractEffectiveStatus;
+  days_to_end?: number | null;
+  expiry_reminder?: string;
   remark: string;
   items: ContractItemRow[];
 };
@@ -79,6 +84,7 @@ export default function ContractDetailPage() {
   const [items, setItems] = useState<LocalContractItem[]>([]);
   const [deletedServerIds, setDeletedServerIds] = useState<number[]>([]);
   const [savingItems, setSavingItems] = useState(false);
+  const [lifecycleLoading, setLifecycleLoading] = useState(false);
   const canMutate = hasRole(["admin", "finance_manager", "tech"]);
 
   const load = useCallback(async () => {
@@ -118,6 +124,20 @@ export default function ContractDetailPage() {
     if (!detail?.items?.length) return contractItemsCompletenessHints([]);
     return contractItemsCompletenessHints(mapServerItemsToLocal(detail.items, detail.channel_name || ""));
   }, [canMutate, items, detail]);
+
+  const runLifecycle = async (action: string) => {
+    if (!detail) return;
+    setLifecycleLoading(true);
+    try {
+      await apiRequest(`/contracts/${detail.id}/lifecycle`, "POST", { action });
+      message.success("合同状态已更新");
+      await load();
+    } catch (e) {
+      message.error((e as Error).message);
+    } finally {
+      setLifecycleLoading(false);
+    }
+  };
 
   const saveItemsOnly = async () => {
     if (!Number.isFinite(id) || id <= 0 || !detail) return;
@@ -184,7 +204,9 @@ export default function ContractDetailPage() {
     },
   ];
 
-  const st = detail ? STATUS_LABEL[detail.status] : null;
+  const eff = detail?.effective_status ?? detail?.status;
+  const st = detail && eff ? EFFECTIVE_STATUS_LABEL[eff] : null;
+  const stored = detail?.stored_status;
 
   return (
     <RoleGuard allow={["admin", "finance_manager", "tech", "ops_manager"]}>
@@ -210,10 +232,72 @@ export default function ContractDetailPage() {
           </Typography.Paragraph>
           {detail ? (
             <>
+              <Card size="small" title="合同状态与到期">
+                <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                  <Space wrap align="center">
+                    <Typography.Text type="secondary">当前展示状态：</Typography.Text>
+                    {st ? <Tag color={st.color}>{st.text}</Tag> : eff}
+                    <Typography.Text type="secondary">（存储：{stored || "—"}）</Typography.Text>
+                  </Space>
+                  <Typography.Text>
+                    有效期：{detail.start_date ? dayjs(detail.start_date).format("YYYY-MM-DD") : "—"} ~{" "}
+                    {detail.end_date ? dayjs(detail.end_date).format("YYYY-MM-DD") : "—"}
+                  </Typography.Text>
+                  <Typography.Text>
+                    距离到期：
+                    {detail.days_to_end == null
+                      ? "—"
+                      : detail.days_to_end < 0
+                        ? `已过期（超 ${-detail.days_to_end} 天）`
+                        : detail.days_to_end === 0
+                          ? "今天到期"
+                          : `剩余 ${detail.days_to_end} 天`}
+                    {detail.expiry_reminder ? ` · ${detail.expiry_reminder}` : ""}
+                  </Typography.Text>
+                  {canMutate ? (
+                    <Space wrap>
+                      {stored === "draft" ? (
+                        <Button type="primary" loading={lifecycleLoading} onClick={() => void runLifecycle("activate")}>
+                          草稿 → 生效
+                        </Button>
+                      ) : null}
+                      {stored === "active" ? (
+                        <Button danger loading={lifecycleLoading} onClick={() => void runLifecycle("terminate")}>
+                          终止合同
+                        </Button>
+                      ) : null}
+                      {stored === "terminated" ? (
+                        <>
+                          <Button type="primary" loading={lifecycleLoading} onClick={() => void runLifecycle("archive")}>
+                            已终止 → 归档
+                          </Button>
+                          <Button loading={lifecycleLoading} onClick={() => void runLifecycle("restore_active")}>
+                            恢复为生效
+                          </Button>
+                          <Button loading={lifecycleLoading} onClick={() => void runLifecycle("restore_draft")}>
+                            恢复为草稿
+                          </Button>
+                        </>
+                      ) : null}
+                      {stored === "archived" ? (
+                        <>
+                          <Button loading={lifecycleLoading} onClick={() => void runLifecycle("restore_active")}>
+                            恢复为生效
+                          </Button>
+                          <Button loading={lifecycleLoading} onClick={() => void runLifecycle("restore_draft")}>
+                            恢复为草稿
+                          </Button>
+                        </>
+                      ) : null}
+                    </Space>
+                  ) : null}
+                </Space>
+              </Card>
+
               <Descriptions title="合同基础信息" bordered column={2} size="small">
                 <Descriptions.Item label="合同编号">{detail.contract_no}</Descriptions.Item>
-                <Descriptions.Item label="状态">
-                  {st ? <Tag color={st.color}>{st.text}</Tag> : detail.status}
+                <Descriptions.Item label="展示状态">
+                  {st ? <Tag color={st.color}>{st.text}</Tag> : eff}
                 </Descriptions.Item>
                 <Descriptions.Item label="合同名称" span={2}>
                   {detail.contract_name}
