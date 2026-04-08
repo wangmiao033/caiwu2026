@@ -1685,6 +1685,62 @@ def confirm_recon(task_id: int, db: Session = Depends(get_db), _: dict = Depends
     return {"task_id": task_id, "status": task.status}
 
 
+@app.post("/recon/{task_id}/revert-confirm")
+def revert_confirm_recon(
+    task_id: int,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance])),
+):
+    task = db.get(ReconTask, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.status != ReconStatus.confirmed:
+        raise HTTPException(status_code=400, detail="仅已确认任务允许撤销")
+    history = db.scalar(select(ImportHistory).where(ImportHistory.task_id == task_id).order_by(ImportHistory.id.desc()).limit(1))
+    if history and (history.lifecycle_status or "active") == "discarded":
+        raise HTTPException(status_code=400, detail="已作废批次不可撤销入账")
+
+    period = task.period
+    bill_cnt = int(db.scalar(select(func.count(Bill.id)).where(Bill.period == period)) or 0)
+    if bill_cnt > 0:
+        raise HTTPException(status_code=400, detail="该账期已生成账单，禁止撤销入账")
+
+    stmt_cnt = int(db.scalar(select(func.count(ChannelSettlementStatement.id)).where(ChannelSettlementStatement.period == period)) or 0)
+    if stmt_cnt > 0:
+        raise HTTPException(status_code=400, detail="该账期已生成结算单，禁止撤销入账")
+
+    inv_cnt = int(
+        db.scalar(
+            select(func.count(Invoice.id))
+            .select_from(Invoice)
+            .join(Bill, Bill.id == Invoice.bill_id)
+            .where(Bill.period == period)
+        )
+        or 0
+    )
+    if inv_cnt > 0:
+        raise HTTPException(status_code=400, detail="该账期已有发票，禁止撤销入账")
+
+    rec_cnt = int(
+        db.scalar(
+            select(func.count(Receipt.id))
+            .select_from(Receipt)
+            .join(Bill, Bill.id == Receipt.bill_id)
+            .where(Bill.period == period)
+        )
+        or 0
+    )
+    if rec_cnt > 0:
+        raise HTTPException(status_code=400, detail="该账期已有回款，禁止撤销入账")
+
+    task.status = ReconStatus.pending
+    if history:
+        history.status = "待确认"
+    write_system_audit(db, ctx["user"], "revert_confirm_recon_period", "recon_task", str(task.id), f"撤销确认账期: {task.period}")
+    db.commit()
+    return {"task_id": task_id, "status": task.status}
+
+
 @app.post("/recon/issues/{issue_id}/resolve")
 def resolve_issue(
     issue_id: int,

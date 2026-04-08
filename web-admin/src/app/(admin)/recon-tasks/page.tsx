@@ -90,6 +90,7 @@ type ImportDetail = ImportBatchRow & {
 };
 type RecomputeResp = { total: number; matched: number; unmatched: number; issues: number };
 type DiscardResp = { id: number; lifecycle_status: "discarded"; already_discarded?: boolean };
+type RevertConfirmResp = { task_id: number; status: string };
 
 const emptySummary: ImportSummary = {
   batch_count: 0,
@@ -139,6 +140,7 @@ export default function ReconTasksPage() {
   const [issuesLoading, setIssuesLoading] = useState(false);
   const [recomputingId, setRecomputingId] = useState<number | null>(null);
   const [discardingId, setDiscardingId] = useState<number | null>(null);
+  const [revertingTaskId, setRevertingTaskId] = useState<number | null>(null);
 
   const loadList = useCallback(
     async (pageOverride?: number) => {
@@ -255,6 +257,26 @@ export default function ReconTasksPage() {
           }
         } catch (e) {
           message.error((e as Error).message);
+        }
+      },
+    });
+  };
+
+  const revertConfirmTask = (row: ImportBatchRow) => {
+    Modal.confirm({
+      title: "撤销入账",
+      content: "撤销后该批次将回到待确认状态，是否继续？",
+      onOk: async () => {
+        setRevertingTaskId(row.task_id);
+        try {
+          await apiRequest<RevertConfirmResp>(`/recon/${row.task_id}/revert-confirm`, "POST");
+          message.success("撤销成功，批次已回到待确认");
+          await loadList();
+          await refreshDrawerIfOpen();
+        } catch (e) {
+          message.error((e as Error).message);
+        } finally {
+          setRevertingTaskId(null);
         }
       },
     });
@@ -627,7 +649,7 @@ export default function ReconTasksPage() {
             title: "操作",
             key: "actions",
             fixed: "right",
-            width: 410,
+            width: 480,
             render: (_, r) => (
               <Space wrap size="small">
                 <Button size="small" type="link" onClick={() => void loadDetailBundle(r.id, "overview")}>
@@ -646,6 +668,15 @@ export default function ReconTasksPage() {
                   onClick={() => confirmTask(r.task_id)}
                 >
                   确认入账
+                </Button>
+                <Button
+                  size="small"
+                  type="link"
+                  disabled={r.lifecycle_status === "discarded" || r.task_status !== "已确认"}
+                  loading={revertingTaskId === r.task_id}
+                  onClick={() => revertConfirmTask(r)}
+                >
+                  撤销入账
                 </Button>
                 <Button
                   size="small"
