@@ -3678,7 +3678,8 @@ def generate_bills(
         key = (BillType.channel, target)
         existing = existing_key_map.get(key)
         if existing:
-            if overwrite:
+            # 覆盖模式仅同步「待发送」草稿金额，避免改写已进入对账/开票/回款流程的账单
+            if overwrite and existing.status == BillStatus.draft:
                 existing.amount = amount
                 updated += 1
             continue
@@ -3688,7 +3689,7 @@ def generate_bills(
         key = (BillType.rd, target)
         existing = existing_key_map.get(key)
         if existing:
-            if overwrite:
+            if overwrite and existing.status == BillStatus.draft:
                 existing.amount = amount
                 updated += 1
             continue

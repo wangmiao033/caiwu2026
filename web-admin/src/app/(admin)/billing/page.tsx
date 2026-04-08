@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Button, Card, Descriptions, Drawer, Empty, Input, Modal, Select, Space, Switch, Table, Tag, Tooltip, message } from "antd";
+import { Alert, Button, Card, Descriptions, Drawer, Empty, Input, Modal, Select, Space, Switch, Table, Tag, Tooltip, message } from "antd";
 import { apiRequest } from "@/lib/api";
 import { hasRole } from "@/lib/rbac";
 import { BillingRule, calcTrialResult, matchRuleForBill } from "@/lib/billingTrial";
@@ -127,6 +127,36 @@ export default function BillingPage() {
         try {
           const data = await apiRequest<Record<string, unknown>>(`/billing/generate?period=${encodeURIComponent(period)}&force_new_version=false`, "POST");
           message.success(`生成完成: ${JSON.stringify(data)}`);
+          await loadBills();
+        } catch (e) {
+          message.error((e as Error).message);
+        }
+      },
+    });
+  };
+
+  const generateOverwriteDrafts = async () => {
+    Modal.confirm({
+      title: "覆盖重生成（仅草稿）",
+      okText: "确认覆盖重生成",
+      okType: "danger",
+      content: (
+        <div>
+          <p>
+            将按账期 <strong>{period}</strong> 与当前<strong>已确认核对任务</strong>数据重新计算金额。<strong>仅会覆盖状态为「待发送」的草稿账单</strong>；已发送、对方确认、有异议及已进入开票/回款流程的账单<strong>不会被改写金额</strong>。
+          </p>
+          <p style={{ marginBottom: 0 }}>
+            若渠道汇总或映射有变化，列表中可能出现新增或不再出现的账单行，请在生成后核对列表与导出结果。此操作<strong>不可自动撤销</strong>，请确认无误后再执行。
+          </p>
+        </div>
+      ),
+      onOk: async () => {
+        try {
+          const data = await apiRequest<Record<string, unknown>>(
+            `/billing/generate?period=${encodeURIComponent(period)}&overwrite=true&force_new_version=false`,
+            "POST",
+          );
+          message.success(`覆盖重生成完成: ${JSON.stringify(data)}`);
           await loadBills();
         } catch (e) {
           message.error((e as Error).message);
@@ -420,30 +450,41 @@ export default function BillingPage() {
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
       <Card title="账单生成">
-        <Space wrap>
-          <Input
-            value={period}
-            onChange={(e) => setPeriod(e.target.value)}
-            onBlur={() => {
-              const t = period.trim();
-              if (PERIOD_YM_RE.test(t)) void applyPeriod(t);
-            }}
-            placeholder="账期 YYYY-MM"
-            style={{ width: 130 }}
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Alert
+            type="warning"
+            showIcon
+            message="覆盖重生成说明"
+            description="「覆盖重生成」仅在本账期已有有效账单时可用，用于按最新已确认核对数据刷新「待发送」草稿账单金额；不修改已进入后续流程的账单。操作前请确认账期与映射无误。"
           />
-          <Select
-            placeholder="最近账期"
-            allowClear
-            style={{ width: 150 }}
-            options={recentPeriodOptions}
-            value={recentPeriodOptions.some((o) => o.value === period) ? period : undefined}
-            onChange={(v) => {
-              if (v) void applyPeriod(v);
-            }}
-          />
-          <Button type="primary" onClick={generate}>
-            生成账单
-          </Button>
+          <Space wrap>
+            <Input
+              value={period}
+              onChange={(e) => setPeriod(e.target.value)}
+              onBlur={() => {
+                const t = period.trim();
+                if (PERIOD_YM_RE.test(t)) void applyPeriod(t);
+              }}
+              placeholder="账期 YYYY-MM"
+              style={{ width: 130 }}
+            />
+            <Select
+              placeholder="最近账期"
+              allowClear
+              style={{ width: 150 }}
+              options={recentPeriodOptions}
+              value={recentPeriodOptions.some((o) => o.value === period) ? period : undefined}
+              onChange={(v) => {
+                if (v) void applyPeriod(v);
+              }}
+            />
+            <Button type="primary" onClick={generate}>
+              生成账单
+            </Button>
+            <Button danger onClick={generateOverwriteDrafts}>
+              覆盖重生成
+            </Button>
+          </Space>
         </Space>
       </Card>
       <Card
