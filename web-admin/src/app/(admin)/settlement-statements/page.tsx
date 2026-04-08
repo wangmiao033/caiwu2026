@@ -5,13 +5,16 @@ import {
   Alert,
   Button,
   Card,
+  Col,
   Descriptions,
   Drawer,
   Empty,
   Input,
   Modal,
+  Row,
   Select,
   Space,
+  Statistic,
   Table,
   Tag,
   Typography,
@@ -21,6 +24,8 @@ import { apiRequest } from "@/lib/api";
 import { hasRole } from "@/lib/rbac";
 
 type ChannelOption = { id: number; name: string };
+
+type ReconciliationStatus = "pending" | "confirmed" | "exported";
 
 type StatementRow = {
   id: number;
@@ -33,8 +38,20 @@ type StatementRow = {
   total_channel_fee_amount: number;
   total_settlement_amount: number;
   status: string;
+  reconciliation_status: ReconciliationStatus;
   updated_at: string;
   created_at: string;
+};
+
+type SummaryResp = {
+  period: string;
+  eligible_channel_count: number;
+  generated_statement_count: number;
+  pending_reconciliation_count: number;
+  reconciled_channel_count: number;
+  exported_channel_count: number;
+  total_settlement_amount: number | string;
+  warning?: string | null;
 };
 
 type StatementListResp = {
@@ -63,6 +80,7 @@ type StatementDetail = StatementRow & {
   created_by: string;
   party_platform_name?: string;
   party_channel_name?: string;
+  reconciliation_status?: ReconciliationStatus;
   items: StatementDetailItem[];
 };
 
@@ -104,6 +122,17 @@ function statusTag(status: string) {
   return <Tag color="blue">{status || "generated"}</Tag>;
 }
 
+function reconTag(status: ReconciliationStatus | string | undefined) {
+  const s = (status || "pending") as ReconciliationStatus;
+  const map: Record<ReconciliationStatus, { label: string; color: string }> = {
+    pending: { label: "待对账", color: "orange" },
+    confirmed: { label: "已确认", color: "green" },
+    exported: { label: "已导出", color: "blue" },
+  };
+  const x = map[s] || map.pending;
+  return <Tag color={x.color}>{x.label}</Tag>;
+}
+
 async function downloadStatementExport(id: number, filename: string) {
   const token = localStorage.getItem("access_token") || "";
   const xRole = localStorage.getItem("x_role") || "";
@@ -142,6 +171,8 @@ export default function SettlementStatementsPage() {
   const [listKeyword, setListKeyword] = useState("");
   const [channels, setChannels] = useState<ChannelOption[]>([]);
   const [rows, setRows] = useState<StatementRow[]>([]);
+  const [summary, setSummary] = useState<SummaryResp | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [batchLoading, setBatchLoading] = useState(false);
   const [exportAllLoading, setExportAllLoading] = useState(false);
@@ -177,11 +208,38 @@ export default function SettlementStatementsPage() {
       if (kw) p.set("keyword", kw);
       p.set("status", "generated");
       const data = await apiRequest<StatementListResp>(`/settlement-statements?${p.toString()}`);
-      setRows(data.items || []);
+      const items = (data.items || []).map((row) => ({
+        ...row,
+        reconciliation_status: (row as StatementRow).reconciliation_status || "pending",
+      })) as StatementRow[];
+      setRows(items);
     } catch (e) {
       message.error((e as Error).message);
     } finally {
       setLoading(false);
+    }
+  }, [stmtPeriod, channelId]);
+
+  const loadSummary = useCallback(async () => {
+    const periodNorm = normalizePeriodYm(stmtPeriod.trim());
+    if (!periodNorm) {
+      setSummary(null);
+      return;
+    }
+    setSummaryLoading(true);
+    try {
+      const q = new URLSearchParams();
+      q.set("period", periodNorm);
+      if (channelId) q.set("channel_id", String(channelId));
+      const kw = listKeywordRef.current.trim();
+      if (kw) q.set("keyword", kw);
+      const data = await apiRequest<SummaryResp>(`/settlement-statements/summary?${q.toString()}`);
+      setSummary(data);
+    } catch (e) {
+      setSummary(null);
+      message.warning((e as Error).message || "汇总加载失败");
+    } finally {
+      setSummaryLoading(false);
     }
   }, [stmtPeriod, channelId]);
 
@@ -191,7 +249,25 @@ export default function SettlementStatementsPage() {
 
   useEffect(() => {
     void loadList();
-  }, [loadList]);
+    void loadSummary();
+  }, [loadList, loadSummary]);
+
+  const refreshData = useCallback(async () => {
+    await loadList();
+    await loadSummary();
+  }, [loadList, loadSummary]);
+
+  const updateReconciliationStatus = async (statementId: number, value: ReconciliationStatus) => {
+    try {
+      await apiRequest(`/settlement-statements/${statementId}/reconciliation-status`, "PATCH", {
+        reconciliation_status: value,
+      });
+      message.success("对账状态已更新");
+      await refreshData();
+    } catch (e) {
+      message.error((e as Error).message);
+    }
+  };
 
   const canonicalPeriod = (): string | null => {
     const sn = normalizePeriodYm(stmtPeriod.trim());
@@ -232,7 +308,7 @@ export default function SettlementStatementsPage() {
         });
       }
       if (!nOk && !errs.length) message.info("当前账期没有可生成的渠道月结单");
-      await loadList();
+      await refreshData();
     } catch (e) {
       message.error((e as Error).message || "生成失败");
     } finally {
@@ -266,6 +342,7 @@ export default function SettlementStatementsPage() {
         await new Promise((res) => setTimeout(res, 400));
       }
       message.success(`已依次下载 ${rows.length} 个 Excel`);
+      await refreshData();
     } catch (e) {
       message.error((e as Error).message);
     } finally {
@@ -288,6 +365,7 @@ export default function SettlementStatementsPage() {
       const fn = `settlement_statement_${row.period}_${row.channel_name || row.channel_id}.xlsx`;
       await downloadStatementExport(id, fn);
       message.success("导出成功");
+      await refreshData();
     } catch (e) {
       message.error((e as Error).message);
     }
@@ -319,6 +397,39 @@ export default function SettlementStatementsPage() {
           </Typography.Paragraph>
         }
       />
+
+      {summary?.warning ? (
+        <Alert type="warning" showIcon message="导入批次异常" description={summary.warning} style={{ marginBottom: 0 }} />
+      ) : null}
+
+      <Card size="small" title="月结单汇总（随账期与筛选条件更新）" loading={summaryLoading}>
+        <Row gutter={[12, 12]}>
+          <Col xs={24} sm={12} md={8} lg={8} xl={4}>
+            <Statistic title="本月渠道总数" value={summary?.eligible_channel_count ?? 0} />
+          </Col>
+          <Col xs={24} sm={12} md={8} lg={8} xl={4}>
+            <Statistic title="已生成月结单数" value={summary?.generated_statement_count ?? 0} />
+          </Col>
+          <Col xs={24} sm={12} md={8} lg={8} xl={4}>
+            <Statistic title="已对完账渠道数" value={summary?.reconciled_channel_count ?? 0} />
+          </Col>
+          <Col xs={24} sm={12} md={8} lg={8} xl={4}>
+            <Statistic title="待对账渠道数" value={summary?.pending_reconciliation_count ?? 0} valueStyle={{ color: "#d46b08" }} />
+          </Col>
+          <Col xs={24} sm={12} md={8} lg={8} xl={4}>
+            <Statistic title="已导出渠道数" value={summary?.exported_channel_count ?? 0} />
+          </Col>
+          <Col xs={24} sm={12} md={8} lg={8} xl={4}>
+            <Statistic
+              title="总结算金额"
+              value={Number(summary?.total_settlement_amount ?? 0)}
+              precision={2}
+              suffix="元"
+              groupSeparator=","
+            />
+          </Col>
+        </Row>
+      </Card>
 
       <Card
         title="月结单列表"
@@ -352,7 +463,12 @@ export default function SettlementStatementsPage() {
               style={{ width: 180 }}
               onPressEnter={() => loadList()}
             />
-            <Button onClick={() => loadList()} loading={loading}>
+            <Button
+              onClick={() => {
+                void refreshData();
+              }}
+              loading={loading || summaryLoading}
+            >
               查询
             </Button>
             {canOperate && (
@@ -385,6 +501,26 @@ export default function SettlementStatementsPage() {
             { title: "结算金额合计", render: (_, r) => amount(r.total_settlement_amount) },
             { title: "状态", width: 100, render: (_, r) => statusTag(r.status) },
             {
+              title: "对账状态",
+              width: 140,
+              render: (_, r) =>
+                canOperate ? (
+                  <Select<ReconciliationStatus>
+                    size="small"
+                    style={{ width: 120 }}
+                    value={(r.reconciliation_status as ReconciliationStatus) || "pending"}
+                    options={[
+                      { value: "pending", label: "待对账" },
+                      { value: "confirmed", label: "已确认" },
+                      { value: "exported", label: "已导出" },
+                    ]}
+                    onChange={(v) => void updateReconciliationStatus(r.id, v)}
+                  />
+                ) : (
+                  reconTag(r.reconciliation_status)
+                ),
+            },
+            {
               title: "操作",
               fixed: "right",
               width: 220,
@@ -414,6 +550,7 @@ export default function SettlementStatementsPage() {
               <Descriptions.Item label="账期">{detail.period}</Descriptions.Item>
               <Descriptions.Item label="渠道">{detail.channel_name}</Descriptions.Item>
               <Descriptions.Item label="状态">{statusTag(detail.status)}</Descriptions.Item>
+              <Descriptions.Item label="对账状态">{reconTag(detail.reconciliation_status)}</Descriptions.Item>
               <Descriptions.Item label="创建人">{detail.created_by || "-"}</Descriptions.Item>
               <Descriptions.Item label="原始流水合计">{amount(detail.total_gross_amount)}</Descriptions.Item>
               <Descriptions.Item label="结算金额合计">{amount(detail.total_settlement_amount)}</Descriptions.Item>

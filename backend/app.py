@@ -11,7 +11,7 @@ import tempfile
 from decimal import Decimal
 from urllib import error as url_error
 from urllib import request as url_request
-from typing import Optional
+from typing import Literal, Optional
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -427,6 +427,8 @@ class ChannelSettlementStatement(Base):
     note: Mapped[str] = mapped_column(String(500), default="")
     party_platform_name: Mapped[str] = mapped_column(String(200), default="广州熊动科技有限公司")
     party_channel_name: Mapped[str] = mapped_column(String(200), default="")
+    # 对账进度（最小版）：pending=待对账，confirmed=已确认，exported=已导出
+    reconciliation_status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
     created_by: Mapped[str] = mapped_column(String(50), default="system")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now(), index=True)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now(), index=True)
@@ -757,6 +759,10 @@ class SettlementStatementGenerateIn(BaseModel):
 class SettlementGenerateAllForPeriodIn(BaseModel):
     period: str
     overwrite: bool = False
+
+
+class SettlementReconciliationStatusIn(BaseModel):
+    reconciliation_status: Literal["pending", "confirmed", "exported"]
 
 
 class BillStatusIn(BaseModel):
@@ -1258,6 +1264,13 @@ def ensure_settlement_statement_v2_columns():
                 with engine.begin() as conn:
                     for s in stmts_h:
                         conn.execute(text(s))
+            if "reconciliation_status" not in existing_h:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE channel_settlement_statements ADD COLUMN reconciliation_status VARCHAR(20) DEFAULT 'pending'"
+                        )
+                    )
         if "channel_settlement_statement_items" in inspector.get_table_names():
             existing_i = {c["name"] for c in inspector.get_columns("channel_settlement_statement_items")}
             stmts_i: list[str] = []
@@ -3442,6 +3455,92 @@ def _settlement_channel_ids_for_period(db: Session, period: str, task_ids: list[
     return sorted(ids)
 
 
+def _settlement_summary_payload(
+    db: Session,
+    period: str,
+    channel_id: Optional[int],
+    keyword: Optional[str],
+) -> dict:
+    """按账期 + 与列表一致的渠道筛选，统计月结单与对账进度（基于导入可映射渠道范围）。"""
+    period_n = _normalize_period_yyyymm(period)
+    task_ids = _active_confirmed_recon_task_ids_for_billing(db, period_n)
+    warn: Optional[str] = None
+    if len(task_ids) > 1:
+        warn = BILLING_PERIOD_MULTI_ACTIVE_CONFIRMED_IMPORTS
+        eligible_ids: list[int] = []
+    elif len(task_ids) == 0:
+        eligible_ids = []
+    else:
+        eligible_ids = _settlement_channel_ids_for_period(db, period_n, task_ids)
+    ch_map: dict[int, str] = {}
+    if eligible_ids:
+        ch_rows = db.scalars(select(Channel).where(Channel.id.in_(eligible_ids))).all()
+        ch_map = {c.id: c.name or "" for c in ch_rows}
+    if channel_id is not None:
+        eligible_ids = [cid for cid in eligible_ids if cid == channel_id]
+    if keyword and str(keyword).strip():
+        key = str(keyword).strip().lower()
+        eligible_ids = [cid for cid in eligible_ids if key in (ch_map.get(cid, "") or "").lower()]
+    statements: list[ChannelSettlementStatement] = []
+    if eligible_ids:
+        statements = list(
+            db.scalars(
+                select(ChannelSettlementStatement).where(
+                    ChannelSettlementStatement.period == period_n,
+                    ChannelSettlementStatement.channel_id.in_(eligible_ids),
+                    ChannelSettlementStatement.status == "generated",
+                )
+            ).all()
+        )
+    stmt_by_cid = {s.channel_id: s for s in statements}
+    eligible_total = len(eligible_ids)
+    generated_count = len(statements)
+    exported_count = 0
+    reconciled_done = 0
+    pending_recon_count = 0
+    for cid in eligible_ids:
+        st = stmt_by_cid.get(cid)
+        if not st:
+            pending_recon_count += 1
+            continue
+        rs = getattr(st, "reconciliation_status", None) or "pending"
+        if rs == "exported":
+            exported_count += 1
+            reconciled_done += 1
+        elif rs == "confirmed":
+            reconciled_done += 1
+        else:
+            pending_recon_count += 1
+    total_settlement = sum((Decimal(str(s.total_settlement_amount or 0)) for s in statements), start=Decimal("0"))
+    return {
+        "period": period_n,
+        "eligible_channel_count": eligible_total,
+        "generated_statement_count": generated_count,
+        "pending_reconciliation_count": pending_recon_count,
+        "reconciled_channel_count": reconciled_done,
+        "exported_channel_count": exported_count,
+        "total_settlement_amount": total_settlement,
+        "warning": warn,
+    }
+
+
+@app.get("/settlement-statements/summary")
+def settlement_statements_summary(
+    period: str = Query(..., description="账期 YYYY-MM"),
+    channel_id: Optional[int] = Query(None),
+    keyword: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance, Role.ops])),
+):
+    try:
+        payload = _settlement_summary_payload(db, period, channel_id, keyword)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=400, detail="账期格式无效或无法汇总")
+    return payload
+
+
 @app.get("/settlement-statements")
 def list_settlement_statements(
     period: Optional[str] = None,
@@ -3481,6 +3580,7 @@ def list_settlement_statements(
             "total_channel_fee_amount": row.total_channel_fee_amount,
             "total_settlement_amount": row.total_settlement_amount,
             "status": row.status,
+            "reconciliation_status": getattr(row, "reconciliation_status", None) or "pending",
             "updated_at": row.updated_at,
             "created_at": row.created_at,
         }
@@ -3530,11 +3630,13 @@ def generate_settlement_statement(
             channel_id=payload.channel_id,
             created_by=ctx["user"],
             status="generated",
+            reconciliation_status="pending",
             created_at=now,
             updated_at=now,
         )
         db.add(statement)
         db.flush()
+    statement.reconciliation_status = "pending"
     statement.total_gross_amount = total_gross_amount
     statement.total_discount_amount = total_discount_amount
     statement.total_settlement_base_amount = total_settlement_base_amount
@@ -3640,11 +3742,13 @@ def generate_all_channel_settlements_for_period(
                     channel_id=cid,
                     created_by=ctx["user"],
                     status="generated",
+                    reconciliation_status="pending",
                     created_at=now,
                     updated_at=now,
                 )
                 db.add(st)
                 db.flush()
+            st.reconciliation_status = "pending"
             st.total_gross_amount = total_gross_amount
             st.total_discount_amount = total_discount_amount
             st.total_settlement_base_amount = total_settlement_base_amount
@@ -3723,6 +3827,7 @@ def get_settlement_statement(
         "note": statement.note,
         "party_platform_name": party_a,
         "party_channel_name": party_b,
+        "reconciliation_status": getattr(statement, "reconciliation_status", None) or "pending",
         "created_by": statement.created_by,
         "created_at": statement.created_at,
         "updated_at": statement.updated_at,
@@ -3746,6 +3851,30 @@ def get_settlement_statement(
             for x in items
         ],
     }
+
+
+@app.patch("/settlement-statements/{statement_id}/reconciliation-status")
+def patch_settlement_reconciliation_status(
+    statement_id: int,
+    payload: SettlementReconciliationStatusIn,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance])),
+):
+    statement = db.get(ChannelSettlementStatement, statement_id)
+    if not statement:
+        raise HTTPException(status_code=404, detail="对账单不存在")
+    statement.reconciliation_status = payload.reconciliation_status
+    statement.updated_at = dt.datetime.now()
+    write_system_audit(
+        db,
+        ctx["user"],
+        "update_settlement_reconciliation_status",
+        "settlement_statement",
+        str(statement.id),
+        f"更新对账状态：{statement.period} → {payload.reconciliation_status}",
+    )
+    db.commit()
+    return {"id": statement.id, "reconciliation_status": statement.reconciliation_status}
 
 
 @app.get("/settlement-statements/{statement_id}/export")
@@ -3845,6 +3974,8 @@ def export_settlement_statement(
         ws.column_dimensions[get_column_letter(i)].width = w
     bio = io.BytesIO()
     wb.save(bio)
+    statement.reconciliation_status = "exported"
+    statement.updated_at = dt.datetime.now()
     write_system_audit(
         db,
         ctx["user"],
