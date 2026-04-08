@@ -297,6 +297,7 @@ class ImportHistory(Base):
     invalid_count: Mapped[int] = mapped_column(default=0)
     amount_sum: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
     status: Mapped[str] = mapped_column(String(30), default="待确认")
+    lifecycle_status: Mapped[str] = mapped_column(String(20), default="active", index=True)
     matched_variant_count: Mapped[int] = mapped_column(default=0)
     unmatched_variant_count: Mapped[int] = mapped_column(default=0)
     summary: Mapped[str] = mapped_column(String(500), default="")
@@ -664,6 +665,7 @@ class ImportHistoryOut(Out):
     invalid_count: int
     amount_sum: Decimal
     status: str
+    lifecycle_status: str = "active"
     summary: str
     created_by: str
     created_at: dt.datetime
@@ -990,6 +992,8 @@ def ensure_import_enrichment_columns():
             statements.append("ALTER TABLE import_history ADD COLUMN matched_variant_count INTEGER DEFAULT 0")
         if "unmatched_variant_count" not in existing:
             statements.append("ALTER TABLE import_history ADD COLUMN unmatched_variant_count INTEGER DEFAULT 0")
+        if "lifecycle_status" not in existing:
+            statements.append("ALTER TABLE import_history ADD COLUMN lifecycle_status VARCHAR(20) DEFAULT 'active'")
         if statements:
             with engine.begin() as conn:
                 for stmt in statements:
@@ -1643,6 +1647,7 @@ async def import_statement(
             status="异常待处理" if issue_count > 0 else "待确认",
             matched_variant_count=matched_variant_count,
             unmatched_variant_count=unmatched_variant_count,
+            lifecycle_status="active",
             summary=summary_text,
             created_by=ctx.get("user", "system"),
         )
@@ -1668,6 +1673,9 @@ def confirm_recon(task_id: int, db: Session = Depends(get_db), _: dict = Depends
     task = db.get(ReconTask, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
+    history = db.scalar(select(ImportHistory).where(ImportHistory.task_id == task_id).order_by(ImportHistory.id.desc()).limit(1))
+    if history and (history.lifecycle_status or "active") == "discarded":
+        raise HTTPException(status_code=400, detail="该批次已作废，不能确认入账")
     unresolved = db.scalar(select(func.count(ReconIssue.id)).where(ReconIssue.recon_task_id == task_id, ReconIssue.resolved.is_(False)))
     if unresolved > 0:
         raise HTTPException(status_code=400, detail="仍有异常未处理")
@@ -2793,8 +2801,11 @@ def _filter_import_history_rows(
     status: Optional[str],
     keyword: Optional[str],
     task_status: Optional[str] = None,
+    lifecycle_status: Optional[str] = "active",
 ) -> list[ImportHistory]:
     out = list(rows)
+    if lifecycle_status in {"active", "discarded"}:
+        out = [x for x in out if (x.lifecycle_status or "active") == lifecycle_status]
     if period:
         out = [x for x in out if period in x.period]
     if import_type:
@@ -2825,13 +2836,14 @@ def list_import_history(
     status: Optional[str] = None,
     keyword: Optional[str] = None,
     task_status: Optional[str] = None,
+    lifecycle_status: Optional[str] = "active",
     page: int = 1,
     page_size: int = 20,
     db: Session = Depends(get_db),
     _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops])),
 ):
     rows = db.scalars(select(ImportHistory).order_by(ImportHistory.id.desc())).all()
-    filtered = _filter_import_history_rows(db, rows, period, import_type, status, keyword, task_status)
+    filtered = _filter_import_history_rows(db, rows, period, import_type, status, keyword, task_status, lifecycle_status)
     total = len(filtered)
     amt = Decimal("0")
     matched_v = 0
@@ -3047,6 +3059,8 @@ def recompute_import_history(
     history = db.get(ImportHistory, history_id)
     if not history:
         raise HTTPException(status_code=404, detail="导入历史不存在")
+    if (history.lifecycle_status or "active") == "discarded":
+        raise HTTPException(status_code=400, detail="已作废批次不支持重新计算")
     task = db.get(ReconTask, history.task_id)
     if not task:
         raise HTTPException(status_code=404, detail="导入任务不存在")
@@ -3171,6 +3185,34 @@ def recompute_import_history(
         raise HTTPException(status_code=500, detail=f"重算失败: {str(e)}")
 
     return {"total": total, "matched": matched, "unmatched": unmatched, "issues": issue_count}
+
+
+@app.post("/imports/history/{history_id}/discard")
+def discard_import_history(
+    history_id: int,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops])),
+):
+    history = db.get(ImportHistory, history_id)
+    if not history:
+        raise HTTPException(status_code=404, detail="导入历史不存在")
+    if (history.lifecycle_status or "active") == "discarded":
+        return {"id": history.id, "lifecycle_status": "discarded", "already_discarded": True}
+    task = db.get(ReconTask, history.task_id)
+    if task and task.status == ReconStatus.confirmed:
+        raise HTTPException(status_code=400, detail="已确认入账的批次不可作废")
+    history.lifecycle_status = "discarded"
+    history.status = "已作废"
+    write_system_audit(
+        db,
+        ctx["user"],
+        "discard_import_history",
+        "import_history",
+        str(history.id),
+        f"作废导入批次: task_id={history.task_id}",
+    )
+    db.commit()
+    return {"id": history.id, "lifecycle_status": "discarded"}
 
 
 @app.post("/imports/history/{history_id}/rematch-variants")

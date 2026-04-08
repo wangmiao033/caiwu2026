@@ -46,6 +46,7 @@ type ImportBatchRow = {
   amount_sum: number | string;
   status: string;
   summary: string;
+  lifecycle_status?: "active" | "discarded";
   created_by: string;
   created_at: string;
   matched_variant_count?: number;
@@ -88,6 +89,7 @@ type ImportDetail = ImportBatchRow & {
   resolved_issue_count?: number;
 };
 type RecomputeResp = { total: number; matched: number; unmatched: number; issues: number };
+type DiscardResp = { id: number; lifecycle_status: "discarded"; already_discarded?: boolean };
 
 const emptySummary: ImportSummary = {
   batch_count: 0,
@@ -119,11 +121,13 @@ export default function ReconTasksPage() {
   const [period, setPeriod] = useState("");
   const [importStatus, setImportStatus] = useState("");
   const [taskStatus, setTaskStatus] = useState("");
+  const [lifecycleStatus, setLifecycleStatus] = useState<"active" | "discarded" | "all">("active");
   const [applied, setApplied] = useState({
     keyword: "",
     period: "",
     importStatus: "",
     taskStatus: "",
+    lifecycleStatus: "active" as "active" | "discarded" | "all",
   });
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerTab, setDrawerTab] = useState<"overview" | "issues">("overview");
@@ -134,6 +138,7 @@ export default function ReconTasksPage() {
   const [issues, setIssues] = useState<IssueRow[]>([]);
   const [issuesLoading, setIssuesLoading] = useState(false);
   const [recomputingId, setRecomputingId] = useState<number | null>(null);
+  const [discardingId, setDiscardingId] = useState<number | null>(null);
 
   const loadList = useCallback(
     async (pageOverride?: number) => {
@@ -147,6 +152,7 @@ export default function ReconTasksPage() {
         if (applied.period) qs.set("period", applied.period);
         if (applied.importStatus) qs.set("status", applied.importStatus);
         if (applied.taskStatus) qs.set("task_status", applied.taskStatus);
+        if (applied.lifecycleStatus) qs.set("lifecycle_status", applied.lifecycleStatus);
         const data = await apiRequest<ImportListResp>(`/imports/history?${qs.toString()}`);
         setItems(data.items || []);
         setTotal(data.total ?? 0);
@@ -296,6 +302,27 @@ export default function ReconTasksPage() {
           message.error((e as Error).message);
         } finally {
           setRecomputingId(null);
+        }
+      },
+    });
+  };
+
+  const discardBatch = (row: ImportBatchRow) => {
+    Modal.confirm({
+      title: "作废批次",
+      content: "该批次将标记为已作废，不再参与默认统计和后续处理，是否继续？",
+      okType: "danger",
+      onOk: async () => {
+        setDiscardingId(row.id);
+        try {
+          await apiRequest<DiscardResp>(`/imports/history/${row.id}/discard`, "POST");
+          message.success("批次已作废");
+          await loadList();
+          await refreshDrawerIfOpen();
+        } catch (e) {
+          message.error((e as Error).message);
+        } finally {
+          setDiscardingId(null);
         }
       },
     });
@@ -481,6 +508,17 @@ export default function ReconTasksPage() {
             value={taskStatus || undefined}
             onChange={(v) => setTaskStatus(v || "")}
           />
+          <Select
+            placeholder="批次状态"
+            style={{ width: 140 }}
+            options={[
+              { label: "有效批次", value: "active" },
+              { label: "已作废", value: "discarded" },
+              { label: "全部", value: "all" },
+            ]}
+            value={lifecycleStatus}
+            onChange={(v) => setLifecycleStatus((v || "active") as "active" | "discarded" | "all")}
+          />
           <Button
             type="primary"
             onClick={() => {
@@ -489,6 +527,7 @@ export default function ReconTasksPage() {
                 period: period.trim(),
                 importStatus,
                 taskStatus,
+                lifecycleStatus,
               });
               setPage(1);
             }}
@@ -572,6 +611,9 @@ export default function ReconTasksPage() {
             title: "状态",
             width: 120,
             render: (_, r) => {
+              if (r.lifecycle_status === "discarded") {
+                return <Tag color="default">已作废</Tag>;
+              }
               const color = r.task_status === "异常待处理" ? "red" : r.task_status === "已确认" ? "green" : "gold";
               return (
                 <Space direction="vertical" size={0}>
@@ -597,11 +639,32 @@ export default function ReconTasksPage() {
                 <Button size="small" type="link" onClick={() => void exportBatch(r)}>
                   导出本批
                 </Button>
-                <Button size="small" type="link" disabled={r.task_status === "已确认"} onClick={() => confirmTask(r.task_id)}>
+                <Button
+                  size="small"
+                  type="link"
+                  disabled={r.task_status === "已确认" || r.lifecycle_status === "discarded"}
+                  onClick={() => confirmTask(r.task_id)}
+                >
                   确认入账
                 </Button>
-                <Button size="small" type="link" loading={recomputingId === r.id} onClick={() => recomputeBatch(r)}>
+                <Button
+                  size="small"
+                  type="link"
+                  disabled={r.lifecycle_status === "discarded"}
+                  loading={recomputingId === r.id}
+                  onClick={() => recomputeBatch(r)}
+                >
                   重新计算
+                </Button>
+                <Button
+                  size="small"
+                  type="link"
+                  danger
+                  loading={discardingId === r.id}
+                  disabled={r.lifecycle_status === "discarded" || r.task_status === "已确认"}
+                  onClick={() => discardBatch(r)}
+                >
+                  作废批次
                 </Button>
               </Space>
             ),
