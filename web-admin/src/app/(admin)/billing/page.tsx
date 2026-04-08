@@ -2,11 +2,11 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Alert, Button, Card, Descriptions, Drawer, Empty, Input, Modal, Select, Space, Spin, Switch, Table, Tag, Tooltip, Typography, message } from "antd";
+import { Alert, Button, Card, Descriptions, Drawer, Empty, Input, Modal, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from "antd";
 import { apiRequest } from "@/lib/api";
 import { hasRole } from "@/lib/rbac";
 import { BillingRule, calcTrialResult, matchRuleForBill } from "@/lib/billingTrial";
-import { buildExportFilename, exportMultiSheetXlsx, exportRowsToCsv, exportRowsToXlsx } from "@/lib/export";
+import { buildExportFilename, exportRowsToCsv, exportRowsToXlsx } from "@/lib/export";
 
 type BillRow = {
   id: number;
@@ -56,24 +56,6 @@ type BillDetail = BillRow & {
   };
 };
 
-type PeriodBridgeResp = {
-  period: string;
-  recon_task_id: number;
-  total_import_gross: string;
-  channel_split_total: string;
-  rd_split_total: string;
-  publisher_retention_total: string;
-  balance_delta: string;
-  unmapped_gross: string;
-  unmapped_row_count: number;
-  mapped_row_count: number;
-  raw_row_count: number;
-  active_bills_channel_total: string;
-  active_bills_rd_total: string;
-  bills_match_raw_split: boolean;
-  note: string;
-};
-
 const BILLING_LAST_PERIOD_KEY = "billing_last_period";
 const PERIOD_YM_RE = /^\d{4}-\d{2}$/;
 
@@ -104,18 +86,6 @@ function parseBool(raw: string | null, defaultValue: boolean): boolean {
   return defaultValue;
 }
 
-function fmtBridgeMoney(s: string): string {
-  const n = Number(s);
-  if (!Number.isFinite(n)) return s;
-  return n.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-function bridgeDeltaIsBalanced(delta: string): boolean {
-  const n = Number(delta);
-  if (!Number.isFinite(n)) return false;
-  return Math.abs(n) < 1e-6;
-}
-
 export default function BillingPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -138,33 +108,9 @@ export default function BillingPage() {
   const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
   const [rules, setRules] = useState<BillingRule[]>([]);
   const [exportFormat, setExportFormat] = useState<"xlsx" | "csv">("xlsx");
-  const [periodBridge, setPeriodBridge] = useState<PeriodBridgeResp | null>(null);
-  const [periodBridgeError, setPeriodBridgeError] = useState<string | null>(null);
-  const [bridgeLoading, setBridgeLoading] = useState(false);
   const billingBootstrappedRef = useRef(false);
   const lastUrlPeriodRef = useRef<string | null>(null);
   const recentPeriodOptions = useMemo(() => getRecentPeriodOptions(6), []);
-
-  const loadBridge = async (p: string) => {
-    const t = p.trim();
-    if (!PERIOD_YM_RE.test(t)) {
-      setPeriodBridge(null);
-      setPeriodBridgeError(null);
-      setBridgeLoading(false);
-      return;
-    }
-    setBridgeLoading(true);
-    try {
-      const data = await apiRequest<PeriodBridgeResp>(`/billing/period-bridge?period=${encodeURIComponent(t)}`);
-      setPeriodBridge(data);
-      setPeriodBridgeError(null);
-    } catch (e) {
-      setPeriodBridge(null);
-      setPeriodBridgeError((e as Error).message);
-    } finally {
-      setBridgeLoading(false);
-    }
-  };
 
   useEffect(() => {
     const cache = localStorage.getItem("billing_rules_local");
@@ -235,7 +181,6 @@ export default function BillingPage() {
     } catch (e) {
       message.error((e as Error).message);
     }
-    await loadBridge(nextPeriod);
   };
 
   const canDiscardBill = (b: BillRow) => {
@@ -360,38 +305,13 @@ export default function BillingPage() {
         规则试算_结算金额: x.trial?.settlementAmount ?? "",
         规则试算_利润: x.trial?.profit ?? "",
         账单发送状态: x.status,
-        备注: "行级仅含账单应结金额；账期级原始流水与拆分平衡见 Excel「账期桥接汇总」。规则试算为前端预览。",
+        备注: "账期级「原始流水 vs 拆分」核对请到「渠道结算对账单」页；本导出仅为账单行明细。规则试算为前端预览。",
       }));
 
       if (exportFormat === "csv") {
         exportRowsToCsv(data, buildExportFilename("账单拆分结果_账单金额明细", "csv"));
-        message.info("CSV 为单表；账期桥接汇总请使用 Excel 导出。");
       } else {
-        const br = await apiRequest<PeriodBridgeResp>(`/billing/period-bridge?period=${encodeURIComponent(period.trim())}`);
-        const bridgeRows: Record<string, unknown>[] = [
-          { 项目: "账期", 数值或说明: br.period },
-          { 项目: "核对任务ID", 数值或说明: br.recon_task_id },
-          { 项目: "导入原始流水总额_唯一有效已确认批次", 数值或说明: br.total_import_gross },
-          { 项目: "渠道拆分应结合计_与生成逻辑一致", 数值或说明: br.channel_split_total },
-          { 项目: "研发拆分应结合计_与生成逻辑一致", 数值或说明: br.rd_split_total },
-          { 项目: "发行或公司保留金额合计", 数值或说明: br.publisher_retention_total },
-          { 项目: "差额校验_应等于0", 数值或说明: br.balance_delta },
-          { 项目: "原始行数", 数值或说明: br.raw_row_count },
-          { 项目: "已映射行数", 数值或说明: br.mapped_row_count },
-          { 项目: "未映射行数", 数值或说明: br.unmapped_row_count },
-          { 项目: "未映射流水金额合计", 数值或说明: br.unmapped_gross },
-          { 项目: "有效账单_渠道金额合计", 数值或说明: br.active_bills_channel_total },
-          { 项目: "有效账单_研发金额合计", 数值或说明: br.active_bills_rd_total },
-          { 项目: "有效账单是否与拆分一致", 数值或说明: br.bills_match_raw_split ? "是" : "否（请覆盖重生成）" },
-          { 项目: "说明", 数值或说明: br.note },
-        ];
-        exportMultiSheetXlsx(
-          [
-            { sheetName: "账单金额明细", rows: data as Record<string, unknown>[] },
-            { sheetName: "账期桥接汇总", rows: bridgeRows },
-          ],
-          buildExportFilename("账单拆分结果", "xlsx"),
-        );
+        exportRowsToXlsx(data, buildExportFilename("账单拆分结果_账单金额明细", "xlsx"), "账单金额明细");
       }
       message.success({ content: "导出成功", key: "bill_export" });
     } catch (e) {
@@ -539,54 +459,11 @@ export default function BillingPage() {
         message="本页金额口径：账单拆分 / 应结算"
         description={
           <>
-            列表与导出中的「账单应结金额」为按渠道游戏映射与分成规则，从<strong>唯一有效已确认批次</strong>拆分汇总后的金额。
-            账期级「原始流水 / 渠道拆分 / 研发拆分 / 保留」平衡关系见下方<strong>账期桥接汇总</strong>；原始导入批次核对请前往「导入数据中心」。
+            本页仅处理<strong>账单对象、应结金额与账单流程</strong>（发送、开票、回款等），不承担原始流水与拆分校验。
+            核对<strong>导入 gross 与渠道/研发/保留</strong>请前往「渠道结算对账单」；原始批次请见「导入数据中心」。
           </>
         }
       />
-      <Card title={`账期桥接汇总（${period.trim() || "—"}）`}>
-        {!PERIOD_YM_RE.test(period.trim()) ? (
-          <Empty description="请输入合法账期 YYYY-MM" />
-        ) : periodBridgeError ? (
-          <Alert type="warning" showIcon message="暂无法加载桥接数据" description={periodBridgeError} />
-        ) : bridgeLoading ? (
-          <Spin tip="加载桥接数据…" />
-        ) : periodBridge ? (
-          <Space direction="vertical" size={12} style={{ width: "100%" }}>
-            <Descriptions bordered size="small" column={{ xs: 1, sm: 2, md: 3 }}>
-              <Descriptions.Item label="核对任务 ID">{periodBridge.recon_task_id}</Descriptions.Item>
-              <Descriptions.Item label="原始流水行数">{periodBridge.raw_row_count}</Descriptions.Item>
-              <Descriptions.Item label="未映射行数">{periodBridge.unmapped_row_count}</Descriptions.Item>
-              <Descriptions.Item label="导入原始流水总额">{fmtBridgeMoney(periodBridge.total_import_gross)}</Descriptions.Item>
-              <Descriptions.Item label="渠道拆分应结合计">{fmtBridgeMoney(periodBridge.channel_split_total)}</Descriptions.Item>
-              <Descriptions.Item label="研发拆分应结合计">{fmtBridgeMoney(periodBridge.rd_split_total)}</Descriptions.Item>
-              <Descriptions.Item label="发行/公司保留合计">{fmtBridgeMoney(periodBridge.publisher_retention_total)}</Descriptions.Item>
-              <Descriptions.Item label="差额校验">{fmtBridgeMoney(periodBridge.balance_delta)}</Descriptions.Item>
-              <Descriptions.Item label="未映射流水金额">{fmtBridgeMoney(periodBridge.unmapped_gross)}</Descriptions.Item>
-              <Descriptions.Item label="有效账单·渠道合计">{fmtBridgeMoney(periodBridge.active_bills_channel_total)}</Descriptions.Item>
-              <Descriptions.Item label="有效账单·研发合计">{fmtBridgeMoney(periodBridge.active_bills_rd_total)}</Descriptions.Item>
-            </Descriptions>
-            {bridgeDeltaIsBalanced(periodBridge.balance_delta) ? (
-              <Alert type="success" showIcon message="当前账期拆分平衡（恒等式：原始流水 = 渠道拆分 + 研发拆分 + 保留）" />
-            ) : (
-              <Alert type="error" showIcon message="当前拆分未平衡，请检查映射与分成数据是否有误" description={`差额：${periodBridge.balance_delta}`} />
-            )}
-            {!periodBridge.bills_match_raw_split ? (
-              <Alert
-                type="error"
-                showIcon
-                message="有效账单金额与当前原始拆分不一致"
-                description="请使用「覆盖重生成」或重新生成账单，使列表与桥接数据一致。"
-              />
-            ) : null}
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              {periodBridge.note}
-            </Typography.Text>
-          </Space>
-        ) : (
-          <Empty description="暂无桥接数据" />
-        )}
-      </Card>
       <Card title="账单生成">
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
           <Alert

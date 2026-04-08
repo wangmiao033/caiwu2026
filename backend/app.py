@@ -3702,6 +3702,135 @@ def _compute_billing_split_from_raw(db: Session, task_ids: list[int]) -> dict:
     }
 
 
+CHANNEL_BRIDGE_UNMAPPED_LABEL = "（未映射渠道游戏，未进入账单拆分）"
+
+
+def _channel_rows_for_settlement_reconciliation(db: Session, task_ids: list[int], period: str, split: dict) -> list[dict]:
+    """按与账单生成相同的渠道桶（bill_ch）汇总：原始流水、渠道拆分、归属研发拆分、保留；并对比有效渠道账单行。"""
+    rows = db.scalars(select(RawStatement).where(RawStatement.recon_task_id.in_(task_ids))).all()
+    map_rows = db.scalars(select(ChannelGameMap)).all()
+    map_key = {(m.channel.name, m.game.name): m for m in map_rows}
+    gross_by_ch: dict[str, Decimal] = {}
+    ch_split_by_ch: dict[str, Decimal] = {}
+    rd_split_by_ch: dict[str, Decimal] = {}
+    unmapped_gross = Decimal("0")
+    for r in rows:
+        g = Decimal(str(r.gross_amount or 0))
+        link = map_key.get((r.channel_name, r.game_name))
+        if not link:
+            unmapped_gross += g
+            continue
+        bill_ch = _bill_channel_target_name(r.channel_name, link.channel.name)
+        gross_by_ch[bill_ch] = gross_by_ch.get(bill_ch, Decimal("0")) + g
+        ch_a = g * link.revenue_share_ratio
+        rd_a = g * link.rd_settlement_ratio
+        ch_split_by_ch[bill_ch] = ch_split_by_ch.get(bill_ch, Decimal("0")) + ch_a
+        rd_split_by_ch[bill_ch] = rd_split_by_ch.get(bill_ch, Decimal("0")) + rd_a
+
+    active_bills = db.scalars(select(Bill).where(Bill.period == period, Bill.lifecycle_status == "active")).all()
+    bill_ch_by_target: dict[str, Decimal] = {}
+    for b in active_bills:
+        if b.bill_type == BillType.channel:
+            bill_ch_by_target[b.target_name] = bill_ch_by_target.get(b.target_name, Decimal("0")) + Decimal(str(b.amount))
+
+    def _near(a: Decimal, b: Decimal) -> bool:
+        return abs(a - b) <= Decimal("0.009")
+
+    out: list[dict] = []
+    for ch in sorted(gross_by_ch.keys()):
+        gtot = gross_by_ch[ch]
+        ctot = ch_split_by_ch.get(ch, Decimal("0"))
+        rtot = rd_split_by_ch.get(ch, Decimal("0"))
+        ret = gtot - ctot - rtot
+        bal = gtot - ctot - rtot - ret
+        bpart = bill_ch_by_target.get(ch, Decimal("0"))
+        out.append(
+            {
+                "channel": ch,
+                "import_gross_total": str(gtot),
+                "channel_split_total": str(ctot),
+                "rd_split_total": str(rtot),
+                "retention_total": str(ret),
+                "balance_delta": str(bal),
+                "is_balanced": abs(bal) <= Decimal("0.0001"),
+                "active_bills_channel_total": str(bpart),
+                "bills_match_channel_split": _near(bpart, ctot),
+            }
+        )
+
+    if split.get("unmapped_row_count", 0) > 0 or unmapped_gross > 0:
+        out.append(
+            {
+                "channel": CHANNEL_BRIDGE_UNMAPPED_LABEL,
+                "import_gross_total": str(unmapped_gross),
+                "channel_split_total": "0",
+                "rd_split_total": "0",
+                "retention_total": str(unmapped_gross),
+                "balance_delta": "0",
+                "is_balanced": True,
+                "active_bills_channel_total": "0",
+                "bills_match_channel_split": True,
+            }
+        )
+    return out
+
+
+@app.get("/settlement-statements/period-reconciliation")
+def get_settlement_period_reconciliation(
+    period: str = Query(...),
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops])),
+):
+    period = (period or "").strip()
+    task_ids = _active_confirmed_recon_task_ids_for_billing(db, period)
+    if len(task_ids) > 1:
+        raise HTTPException(status_code=400, detail=BILLING_PERIOD_MULTI_ACTIVE_CONFIRMED_IMPORTS)
+    if len(task_ids) == 0:
+        any_confirmed = db.scalars(select(ReconTask).where(ReconTask.period == period, ReconTask.status == ReconStatus.confirmed)).all()
+        if not any_confirmed:
+            raise HTTPException(status_code=400, detail="该账期无已确认核对任务")
+        raise HTTPException(
+            status_code=400,
+            detail="该账期无已确认且有效的导入批次（可能均已作废），请先在导入数据中心恢复有效批次或撤销入账后再试。",
+        )
+    split = _compute_billing_split_from_raw(db, task_ids)
+    if split["raw_row_count"] == 0:
+        raise HTTPException(status_code=400, detail="无原始数据")
+    channel_rows = _channel_rows_for_settlement_reconciliation(db, task_ids, period, split)
+    active_bills = db.scalars(select(Bill).where(Bill.period == period, Bill.lifecycle_status == "active")).all()
+    bills_ch = sum((Decimal(str(b.amount)) for b in active_bills if b.bill_type == BillType.channel), Decimal("0"))
+    bills_rd = sum((Decimal(str(b.amount)) for b in active_bills if b.bill_type == BillType.rd), Decimal("0"))
+    raw_ch: Decimal = split["channel_split_total"]
+    raw_rd: Decimal = split["rd_split_total"]
+
+    def _money_eq(a: Decimal, b: Decimal) -> bool:
+        return abs(a - b) <= Decimal("0.009")
+
+    return {
+        "period": period,
+        "recon_task_id": task_ids[0],
+        "summary": {
+            "total_import_gross": str(split["total_import_gross"]),
+            "channel_split_total": str(raw_ch),
+            "rd_split_total": str(raw_rd),
+            "publisher_retention_total": str(split["publisher_retention_total"]),
+            "balance_delta": str(split["balance_delta"]),
+            "unmapped_gross": str(split["unmapped_gross"]),
+            "raw_row_count": split["raw_row_count"],
+            "mapped_row_count": split["mapped_row_count"],
+            "unmapped_row_count": split["unmapped_row_count"],
+            "active_bills_channel_total": str(bills_ch),
+            "active_bills_rd_total": str(bills_rd),
+            "bills_match_raw_split": _money_eq(bills_ch, raw_ch) and _money_eq(bills_rd, raw_rd),
+        },
+        "channels": channel_rows,
+        "intro_note": (
+            "本页为渠道结算对账与导入流水核对入口：数据来自该账期唯一「有效且已确认」导入批次，渠道/研发拆分校验与账单生成逻辑一致。"
+            "账单列表与流程仍以「账单管理」为准；原始流水批次核对仍以「导入数据中心」为准。"
+        ),
+    }
+
+
 @app.get("/billing/period-bridge")
 def get_billing_period_bridge(
     period: str = Query(...),
