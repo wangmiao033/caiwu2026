@@ -127,6 +127,21 @@ const parsePairFromDetail = (detail: string): { channel: string; game: string } 
   return { channel: channel || "", game: game || "" };
 };
 
+/** 后端 / 异常中心分成字段为 0~1 比例 */
+const formatRatioPercent = (ratio: unknown) => {
+  const n = Number(ratio);
+  if (Number.isNaN(n)) return "-";
+  return `${Number((n * 100).toFixed(4)).toString()}%`;
+};
+
+const shareExceptionReasonText = (raw: Record<string, unknown>) => {
+  const total = Number(raw.total_ratio);
+  if (!Number.isNaN(total)) {
+    return `渠道-游戏映射中分成比例合计为 ${formatRatioPercent(total)}，与 100% 不一致，需调整该渠道与游戏对应规则或映射。`;
+  }
+  return "渠道-游戏映射中渠道分成与研发分成（等）合计偏离 100%，请核对并修正。";
+};
+
 export default function ExceptionsPage() {
   const router = useRouter();
   const pathname = usePathname();
@@ -243,7 +258,12 @@ export default function ExceptionsPage() {
       return;
     }
     if (row.type === "share") {
-      router.push("/billing-rules");
+      const ch = String(row.raw.channel_name || "").trim();
+      const gm = String(row.raw.game_name || "").trim();
+      const qs = new URLSearchParams();
+      if (ch) qs.set("channel", ch);
+      if (gm) qs.set("game", gm);
+      router.push(`/billing-rules${qs.toString() ? `?${qs.toString()}` : ""}`);
       return;
     }
     if (row.type === "overdue") {
@@ -546,7 +566,24 @@ export default function ExceptionsPage() {
             <Typography.Text>所属批次：{detail.batchName || "-"}</Typography.Text>
             <Typography.Text>账期：{detail.period || "-"}</Typography.Text>
             <Typography.Text>时间：{detail.detectedAt ? dayjs(detail.detectedAt).format("YYYY-MM-DD HH:mm:ss") : "-"}</Typography.Text>
-            <Typography.Text type="secondary">明细：{detail.detail}</Typography.Text>
+            {detail.type === "share" ? (
+              <>
+                <Typography.Text strong>渠道：{String(detail.raw.channel_name || "-")}</Typography.Text>
+                <Typography.Text strong>游戏：{String(detail.raw.game_name || "-")}</Typography.Text>
+                <Typography.Text>渠道费（映射口径）：{formatRatioPercent(detail.raw.channel_share)}</Typography.Text>
+                <Typography.Text>税点：{formatRatioPercent(detail.raw.tax_rate)}</Typography.Text>
+                <Typography.Text>研发分成（映射口径）：{formatRatioPercent(detail.raw.rd_share)}</Typography.Text>
+                <Typography.Text>私点：{formatRatioPercent(detail.raw.private_share)}</Typography.Text>
+                <Typography.Text>发行分成（推算）：{formatRatioPercent(detail.raw.publisher_share)}</Typography.Text>
+                <Typography.Text>合计比例：{formatRatioPercent(detail.raw.total_ratio)}</Typography.Text>
+                <Typography.Text type="warning">异常原因：{shareExceptionReasonText(detail.raw)}</Typography.Text>
+                <Typography.Text type="secondary">
+                  建议处理：在「规则配置」中按上述渠道、游戏筛选后编辑对应行，或到「渠道-游戏映射」核对 revenue_share_ratio / rd_settlement_ratio。亦可点击「快捷处理」自动跳转并筛选。
+                </Typography.Text>
+              </>
+            ) : (
+              <Typography.Text type="secondary">明细：{detail.detail}</Typography.Text>
+            )}
           </Space>
         ) : null}
       </Modal>

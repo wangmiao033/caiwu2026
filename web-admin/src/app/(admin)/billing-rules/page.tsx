@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { Button, Card, Form, Input, InputNumber, Modal, Select, Space, Statistic, Switch, Table, Tag, Upload, message } from "antd";
 import { apiRequest } from "@/lib/api";
 import { buildExportFilename, exportRowsToXlsx } from "@/lib/export";
@@ -46,6 +47,7 @@ const defaultRule = (): Omit<RuleRow, "key" | "channel" | "game"> => ({
 });
 
 export default function BillingRulesPage() {
+  const searchParams = useSearchParams();
   const [channels, setChannels] = useState<SimpleItem[]>([]);
   const [games, setGames] = useState<SimpleItem[]>([]);
   const [maps, setMaps] = useState<MapRow[]>([]);
@@ -58,6 +60,13 @@ export default function BillingRulesPage() {
   const [importRows, setImportRows] = useState<RuleRow[]>([]);
   const [onlyErrors, setOnlyErrors] = useState(false);
   const [form] = Form.useForm();
+
+  useEffect(() => {
+    const ch = searchParams.get("channel");
+    const gm = searchParams.get("game");
+    if (ch) setQChannel(ch);
+    if (gm) setQGame(gm);
+  }, [searchParams]);
 
   useEffect(() => {
     apiRequest<SimpleItem[]>("/channels").then(setChannels).catch(() => {});
