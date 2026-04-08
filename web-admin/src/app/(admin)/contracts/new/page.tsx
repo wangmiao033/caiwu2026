@@ -9,13 +9,20 @@ import Link from "next/link";
 import { apiRequest } from "@/lib/api";
 import RoleGuard from "@/components/RoleGuard";
 import ContractItemsEditor from "../ContractItemsEditor";
-import { STATUS_OPTIONS, toApiItemPayload, type ContractStatus, type LocalContractItem } from "../types";
+import {
+  STATUS_OPTIONS,
+  toApiItemPayload,
+  validateContractItemsForSave,
+  type ContractStatus,
+  type LocalContractItem,
+} from "../types";
 
 type CreatedHeader = { id: number };
 
 export default function ContractNewPage() {
   const router = useRouter();
   const [form] = Form.useForm();
+  const headerChannel = Form.useWatch("channel_name", form) as string | undefined;
   const [items, setItems] = useState<LocalContractItem[]>([]);
   const [saving, setSaving] = useState(false);
   const submit = async () => {
@@ -44,13 +51,23 @@ export default function ContractNewPage() {
       message.error("请填写合同编号、名称与渠道");
       return;
     }
+    const ive = validateContractItemsForSave(items);
+    if (ive.length) {
+      message.error(ive[0]);
+      return;
+    }
     setSaving(true);
     try {
       const created = await apiRequest<CreatedHeader>("/contracts", "POST", payload);
       const cid = created.id;
       for (const row of items) {
         const body = toApiItemPayload(row);
-        if (!body.game_name) continue;
+        if (!body.game_name && !body.channel_name) continue;
+        if (!body.game_name || !body.channel_name) {
+          message.error("每条明细需同时填写游戏与渠道");
+          setSaving(false);
+          return;
+        }
         await apiRequest(`/contracts/${cid}/items`, "POST", body);
       }
       message.success("合同已创建");
@@ -124,7 +141,11 @@ export default function ContractNewPage() {
           </Card>
 
           <Card title="二、合同明细信息" size="small" style={{ marginTop: 16 }}>
-            <ContractItemsEditor value={items} onChange={setItems} />
+            <ContractItemsEditor
+              value={items}
+              onChange={setItems}
+              headerChannelName={typeof headerChannel === "string" ? headerChannel : ""}
+            />
           </Card>
 
           <Card title="三、备注 / 来源信息" size="small" style={{ marginTop: 16 }}>

@@ -9,18 +9,26 @@ import Link from "next/link";
 import { apiRequest } from "@/lib/api";
 import RoleGuard from "@/components/RoleGuard";
 import ContractItemsEditor from "../../ContractItemsEditor";
-import { STATUS_OPTIONS, toApiItemPayload, type ContractStatus, type LocalContractItem } from "../../types";
+import {
+  STATUS_OPTIONS,
+  toApiItemPayload,
+  validateContractItemsForSave,
+  type ContractStatus,
+  type LocalContractItem,
+} from "../../types";
 
 type ContractItemRow = {
   id: number;
   contract_id: number;
   game_name: string;
+  channel_name?: string;
   discount_label: string;
   discount_rate: number;
   channel_share_percent: number;
   channel_fee_percent: number;
   tax_percent: number;
   private_percent: number;
+  item_remark?: string;
   rd_share_note: string;
   is_active: boolean;
 };
@@ -41,17 +49,20 @@ type ContractDetail = {
   items: ContractItemRow[];
 };
 
-function mapServerItemsToLocal(rows: ContractItemRow[]): LocalContractItem[] {
+function mapServerItemsToLocal(rows: ContractItemRow[], fallbackChannel: string): LocalContractItem[] {
+  const fb = fallbackChannel.trim();
   return rows.map((it) => ({
     localKey: `srv-${it.id}`,
     id: it.id,
     game_name: it.game_name,
+    channel_name: (it.channel_name || "").trim() || fb,
     discount_label: it.discount_label || "",
     discount_rate: it.discount_rate ?? 0,
     channel_share_percent: it.channel_share_percent ?? 0,
     channel_fee_percent: it.channel_fee_percent ?? 0,
     tax_percent: it.tax_percent ?? 0,
     private_percent: it.private_percent ?? 0,
+    item_remark: it.item_remark || "",
     rd_share_note: it.rd_share_note || "",
     is_active: !!it.is_active,
   }));
@@ -63,6 +74,7 @@ export default function ContractEditPage() {
   const rawId = params.id;
   const contractId = Number(Array.isArray(rawId) ? rawId[0] : rawId);
   const [form] = Form.useForm();
+  const headerChannel = Form.useWatch("channel_name", form) as string | undefined;
   const [items, setItems] = useState<LocalContractItem[]>([]);
   const [deletedServerIds, setDeletedServerIds] = useState<number[]>([]);
   const [loading, setLoading] = useState(true);
@@ -86,7 +98,7 @@ export default function ContractEditPage() {
         status: data.status,
         remark: data.remark || "",
       });
-      setItems(mapServerItemsToLocal(data.items || []));
+      setItems(mapServerItemsToLocal(data.items || [], data.channel_name || ""));
       setDeletedServerIds([]);
     } catch (e) {
       message.error((e as Error).message);
@@ -134,6 +146,11 @@ export default function ContractEditPage() {
       status: values.status as ContractStatus,
       remark: String(values.remark || "").trim(),
     };
+    const ive = validateContractItemsForSave(items);
+    if (ive.length) {
+      message.error(ive[0]);
+      return;
+    }
     setSaving(true);
     try {
       const delUnique = [...new Set(deletedServerIds)];
@@ -143,7 +160,12 @@ export default function ContractEditPage() {
       await apiRequest(`/contracts/${contractId}`, "PUT", payload);
       for (const row of items) {
         const body = toApiItemPayload(row);
-        if (!body.game_name) continue;
+        if (!body.game_name && !body.channel_name && !row.id) continue;
+        if (!body.game_name || !body.channel_name) {
+          message.error("每条明细需填写游戏与渠道；可删除空白行。");
+          setSaving(false);
+          return;
+        }
         if (row.id && row.id > 0) {
           await apiRequest(`/contract-items/${row.id}`, "PUT", body);
         } else {
@@ -220,7 +242,11 @@ export default function ContractEditPage() {
             </Card>
 
             <Card title="二、合同明细信息" size="small" style={{ marginTop: 16 }}>
-              <ContractItemsEditor value={items} onChange={onItemsChange} />
+              <ContractItemsEditor
+                value={items}
+                onChange={onItemsChange}
+                headerChannelName={typeof headerChannel === "string" ? headerChannel : ""}
+              />
             </Card>
 
             <Card title="三、备注 / 来源信息" size="small" style={{ marginTop: 16 }}>

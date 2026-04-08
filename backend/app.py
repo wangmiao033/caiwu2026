@@ -496,12 +496,14 @@ class ContractItem(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     contract_id: Mapped[int] = mapped_column(ForeignKey("contract_headers.id", ondelete="CASCADE"), index=True)
     game_name: Mapped[str] = mapped_column(String(150), index=True)
+    channel_name: Mapped[str] = mapped_column(String(150), default="", index=True)
     discount_label: Mapped[str] = mapped_column(String(100), default="")
     discount_rate: Mapped[Decimal] = mapped_column(Numeric(8, 4), default=Decimal("0"))
     channel_share_percent: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("0"))
     channel_fee_percent: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("0"))
     tax_percent: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("0"))
     private_percent: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("0"))
+    item_remark: Mapped[str] = mapped_column(String(500), default="")
     rd_share_note: Mapped[str] = mapped_column(String(500), default="")
     is_active: Mapped[bool] = mapped_column(default=True, index=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
@@ -602,24 +604,28 @@ class ContractHeaderIn(BaseModel):
 
 class ContractItemIn(BaseModel):
     game_name: str
+    channel_name: str = ""
     discount_label: str = ""
     discount_rate: Decimal = Decimal("0")
     channel_share_percent: Decimal = Decimal("0")
     channel_fee_percent: Decimal = Decimal("0")
     tax_percent: Decimal = Decimal("0")
     private_percent: Decimal = Decimal("0")
+    item_remark: str = ""
     rd_share_note: str = ""
     is_active: bool = True
 
 
 class ContractDraftItemOut(BaseModel):
     game_name: str = ""
+    channel_name: str = ""
     discount_label: str = ""
     discount_rate: Decimal = Decimal("0")
     channel_share_percent: Decimal = Decimal("0")
     channel_fee_percent: Decimal = Decimal("0")
     tax_percent: Decimal = Decimal("0")
     private_percent: Decimal = Decimal("0")
+    item_remark: str = ""
     rd_share_note: str = ""
     is_active: bool = True
 
@@ -1172,6 +1178,27 @@ def normalize_variant_shares(payload: GameVariantIn) -> tuple[Optional[Decimal],
     return rd_share, publish_share
 
 
+def ensure_contract_item_extra_columns():
+    """旧库 contract_items 补列：明细渠道名、行备注。"""
+    inspector = inspect(engine)
+    if "contract_items" not in inspector.get_table_names():
+        return
+    existing = {c["name"] for c in inspector.get_columns("contract_items")}
+    statements: list[str] = []
+    if "channel_name" not in existing:
+        statements.append("ALTER TABLE contract_items ADD COLUMN channel_name VARCHAR(150) DEFAULT ''")
+    if "item_remark" not in existing:
+        statements.append("ALTER TABLE contract_items ADD COLUMN item_remark VARCHAR(500) DEFAULT ''")
+    if not statements:
+        return
+    try:
+        with engine.begin() as conn:
+            for stmt in statements:
+                conn.execute(text(stmt))
+    except Exception:
+        pass
+
+
 def ensure_contract_tables():
     """兼容旧库：补建 channel 合同表（create_all 通常为幂等，此处再保底一次）。"""
     try:
@@ -1179,6 +1206,7 @@ def ensure_contract_tables():
         ContractItem.__table__.create(bind=engine, checkfirst=True)
     except Exception:
         pass
+    ensure_contract_item_extra_columns()
 
 
 app = FastAPI(title="内部对账系统", version="1.0.0")
@@ -1340,7 +1368,10 @@ def bulk_create_channels(
 
 
 @app.get("/channels")
-def list_channels(db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops]))):
+def list_channels(
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.finance, Role.tech, Role.biz, Role.ops])),
+):
     return db.scalars(select(Channel).order_by(Channel.id.desc())).all()
 
 
@@ -1372,17 +1403,40 @@ def _contract_status_value(s: ContractStatus | str) -> str:
     return str(s)
 
 
+def _assert_contract_item_payload(payload: ContractItemIn) -> tuple[str, str]:
+    gm = (payload.game_name or "").strip()
+    ch = (payload.channel_name or "").strip()
+    if not gm:
+        raise HTTPException(status_code=400, detail="游戏名称不能为空")
+    if not ch:
+        raise HTTPException(status_code=400, detail="明细渠道名称不能为空")
+    dr = payload.discount_rate
+    if dr < 0 or dr > Decimal("100"):
+        raise HTTPException(status_code=400, detail="折扣率需在0~100之间")
+    for label, v in (
+        ("渠道分成比例", payload.channel_share_percent),
+        ("通道费比例", payload.channel_fee_percent),
+        ("税点", payload.tax_percent),
+        ("私点", payload.private_percent),
+    ):
+        if v < 0 or v > Decimal("100"):
+            raise HTTPException(status_code=400, detail=f"{label}需在0~100之间")
+    return gm, ch
+
+
 def _contract_item_dict(it: ContractItem) -> dict:
     return {
         "id": it.id,
         "contract_id": it.contract_id,
         "game_name": it.game_name,
+        "channel_name": it.channel_name or "",
         "discount_label": it.discount_label or "",
         "discount_rate": float(it.discount_rate) if it.discount_rate is not None else 0.0,
         "channel_share_percent": float(it.channel_share_percent) if it.channel_share_percent is not None else 0.0,
         "channel_fee_percent": float(it.channel_fee_percent) if it.channel_fee_percent is not None else 0.0,
         "tax_percent": float(it.tax_percent) if it.tax_percent is not None else 0.0,
         "private_percent": float(it.private_percent) if it.private_percent is not None else 0.0,
+        "item_remark": it.item_remark or "",
         "rd_share_note": it.rd_share_note or "",
         "is_active": bool(it.is_active),
         "created_at": str(it.created_at) if it.created_at else "",
@@ -1530,18 +1584,18 @@ def create_contract_item(
     header = db.get(ContractHeader, contract_id)
     if not header:
         raise HTTPException(status_code=404, detail="合同不存在")
-    gm = (payload.game_name or "").strip()
-    if not gm:
-        raise HTTPException(status_code=400, detail="游戏名称不能为空")
+    gm, ch = _assert_contract_item_payload(payload)
     row = ContractItem(
         contract_id=contract_id,
         game_name=gm,
+        channel_name=ch,
         discount_label=(payload.discount_label or "").strip(),
         discount_rate=payload.discount_rate,
         channel_share_percent=payload.channel_share_percent,
         channel_fee_percent=payload.channel_fee_percent,
         tax_percent=payload.tax_percent,
         private_percent=payload.private_percent,
+        item_remark=(payload.item_remark or "").strip()[:500],
         rd_share_note=(payload.rd_share_note or "").strip(),
         is_active=bool(payload.is_active),
     )
@@ -1563,16 +1617,16 @@ def update_contract_item(
     row = db.get(ContractItem, item_id)
     if not row:
         raise HTTPException(status_code=404, detail="合同明细不存在")
-    gm = (payload.game_name or "").strip()
-    if not gm:
-        raise HTTPException(status_code=400, detail="游戏名称不能为空")
+    gm, ch = _assert_contract_item_payload(payload)
     row.game_name = gm
+    row.channel_name = ch
     row.discount_label = (payload.discount_label or "").strip()
     row.discount_rate = payload.discount_rate
     row.channel_share_percent = payload.channel_share_percent
     row.channel_fee_percent = payload.channel_fee_percent
     row.tax_percent = payload.tax_percent
     row.private_percent = payload.private_percent
+    row.item_remark = (payload.item_remark or "").strip()[:500]
     row.rd_share_note = (payload.rd_share_note or "").strip()
     row.is_active = bool(payload.is_active)
     row.updated_at = dt.datetime.now()
@@ -2211,7 +2265,10 @@ def bulk_create_games(
 
 
 @app.get("/games")
-def list_games(db: Session = Depends(get_db), _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops]))):
+def list_games(
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.finance, Role.tech, Role.biz, Role.ops])),
+):
     return db.scalars(select(Game).order_by(Game.id.desc())).all()
 
 

@@ -14,6 +14,7 @@ import {
   STATUS_OPTIONS,
   createEmptyContractItem,
   toApiItemPayload,
+  validateContractItemsForSave,
   type ContractStatus,
   type LocalContractItem,
 } from "../types";
@@ -22,12 +23,14 @@ type CreatedHeader = { id: number };
 
 type DraftParseItem = {
   game_name?: string;
+  channel_name?: string;
   discount_label?: string;
   discount_rate?: number | string;
   channel_share_percent?: number | string;
   channel_fee_percent?: number | string;
   tax_percent?: number | string;
   private_percent?: number | string;
+  item_remark?: string;
   rd_share_note?: string;
   is_active?: boolean;
 };
@@ -60,19 +63,27 @@ function resolveDirectBackendBase(): string {
   return "";
 }
 
-function draftItemsToLocal(rows: DraftParseItem[] | undefined): LocalContractItem[] {
-  if (!rows?.length) return [createEmptyContractItem()];
+function draftItemsToLocal(rows: DraftParseItem[] | undefined, defaultChannel: string): LocalContractItem[] {
+  const dc = defaultChannel.trim();
+  if (!rows?.length) {
+    const one = createEmptyContractItem();
+    if (dc) one.channel_name = dc;
+    return [one];
+  }
   return rows.map((r) => {
     const row = createEmptyContractItem();
+    if (dc) row.channel_name = dc;
     return {
       ...row,
       game_name: String(r.game_name || "").trim(),
+      channel_name: String(r.channel_name || "").trim() || dc,
       discount_label: String(r.discount_label || "").trim(),
       discount_rate: num(r.discount_rate),
       channel_share_percent: num(r.channel_share_percent),
       channel_fee_percent: num(r.channel_fee_percent),
       tax_percent: num(r.tax_percent),
       private_percent: num(r.private_percent),
+      item_remark: String(r.item_remark || "").trim(),
       rd_share_note: String(r.rd_share_note || "").trim(),
       is_active: r.is_active !== false,
     };
@@ -82,6 +93,7 @@ function draftItemsToLocal(rows: DraftParseItem[] | undefined): LocalContractIte
 export default function ContractImportDraftPage() {
   const router = useRouter();
   const [form] = Form.useForm();
+  const headerChannel = Form.useWatch("channel_name", form) as string | undefined;
   const [items, setItems] = useState<LocalContractItem[]>([createEmptyContractItem()]);
   const [parsing, setParsing] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -102,7 +114,7 @@ export default function ContractImportDraftPage() {
       status: (data.status as ContractStatus) || "draft",
       remark: String(data.remark || "").trim(),
     });
-    setItems(draftItemsToLocal(data.items));
+    setItems(draftItemsToLocal(data.items, String(data.channel_name || "")));
     message.success("已根据 PDF 生成草稿，请核对后保存");
   };
 
@@ -170,13 +182,23 @@ export default function ContractImportDraftPage() {
       message.error("请填写合同编号、名称与渠道");
       return;
     }
+    const ive = validateContractItemsForSave(items);
+    if (ive.length) {
+      message.error(ive[0]);
+      return;
+    }
     setSaving(true);
     try {
       const created = await apiRequest<CreatedHeader>("/contracts", "POST", payload);
       const cid = created.id;
       for (const row of items) {
         const body = toApiItemPayload(row);
-        if (!body.game_name) continue;
+        if (!body.game_name && !body.channel_name) continue;
+        if (!body.game_name || !body.channel_name) {
+          message.error("每条明细需同时填写游戏与渠道");
+          setSaving(false);
+          return;
+        }
         await apiRequest(`/contracts/${cid}/items`, "POST", body);
       }
       message.success("合同已保存");
@@ -267,7 +289,11 @@ export default function ContractImportDraftPage() {
             <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
               <FilePdfOutlined /> 识别结果依赖 PDF 排版，可能不完整；可在下表增删改。
             </Typography.Paragraph>
-            <ContractItemsEditor value={items} onChange={setItems} />
+            <ContractItemsEditor
+              value={items}
+              onChange={setItems}
+              headerChannelName={typeof headerChannel === "string" ? headerChannel : ""}
+            />
           </Card>
 
           <Card title="三、备注" size="small" style={{ marginTop: 16 }}>
