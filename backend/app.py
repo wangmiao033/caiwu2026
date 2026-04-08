@@ -239,6 +239,10 @@ class RawStatement(Base):
     game_name: Mapped[str] = mapped_column(String(150))
     period: Mapped[str] = mapped_column(String(20), index=True)
     gross_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    channel_id: Mapped[Optional[int]] = mapped_column(index=True, nullable=True)
+    game_id: Mapped[Optional[int]] = mapped_column(index=True, nullable=True)
+    mapping_id: Mapped[Optional[int]] = mapped_column(index=True, nullable=True)
+    channel_share_percent: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
     project_id: Mapped[Optional[int]] = mapped_column(index=True, nullable=True)
     project_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
     variant_id: Mapped[Optional[int]] = mapped_column(index=True, nullable=True)
@@ -247,6 +251,7 @@ class RawStatement(Base):
     publish_company: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     rd_share_percent: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
     publish_share_percent: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    match_status: Mapped[str] = mapped_column(String(20), default="未匹配")
     variant_match_status: Mapped[str] = mapped_column(String(20), default="未匹配版本")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
 
@@ -946,6 +951,14 @@ def ensure_import_enrichment_columns():
     if "raw_statements" in inspector.get_table_names():
         existing = {c["name"] for c in inspector.get_columns("raw_statements")}
         statements: list[str] = []
+        if "channel_id" not in existing:
+            statements.append("ALTER TABLE raw_statements ADD COLUMN channel_id INTEGER")
+        if "game_id" not in existing:
+            statements.append("ALTER TABLE raw_statements ADD COLUMN game_id INTEGER")
+        if "mapping_id" not in existing:
+            statements.append("ALTER TABLE raw_statements ADD COLUMN mapping_id INTEGER")
+        if "channel_share_percent" not in existing:
+            statements.append("ALTER TABLE raw_statements ADD COLUMN channel_share_percent NUMERIC(6,2)")
         if "project_id" not in existing:
             statements.append("ALTER TABLE raw_statements ADD COLUMN project_id INTEGER")
         if "project_name" not in existing:
@@ -962,6 +975,8 @@ def ensure_import_enrichment_columns():
             statements.append("ALTER TABLE raw_statements ADD COLUMN rd_share_percent NUMERIC(6,2)")
         if "publish_share_percent" not in existing:
             statements.append("ALTER TABLE raw_statements ADD COLUMN publish_share_percent NUMERIC(6,2)")
+        if "match_status" not in existing:
+            statements.append("ALTER TABLE raw_statements ADD COLUMN match_status VARCHAR(20) DEFAULT '未匹配'")
         if "variant_match_status" not in existing:
             statements.append("ALTER TABLE raw_statements ADD COLUMN variant_match_status VARCHAR(20) DEFAULT '未匹配版本'")
         if statements:
@@ -3008,12 +3023,154 @@ def get_import_history_raw_rows(
             "game_name": r.game_name,
             "period": r.period,
             "gross_amount": str(r.gross_amount),
+            "channel_id": r.channel_id,
+            "game_id": r.game_id,
+            "mapping_id": r.mapping_id,
+            "channel_share_percent": str(r.channel_share_percent) if r.channel_share_percent is not None else "",
+            "rd_share_percent": str(r.rd_share_percent) if r.rd_share_percent is not None else "",
+            "publish_share_percent": str(r.publish_share_percent) if r.publish_share_percent is not None else "",
+            "match_status": r.match_status,
             "variant_match_status": r.variant_match_status,
             "project_name": r.project_name or "",
             "variant_name": r.variant_name or "",
         }
         for r in rows
     ]
+
+
+@app.post("/imports/history/{history_id}/recompute")
+def recompute_import_history(
+    history_id: int,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops])),
+):
+    history = db.get(ImportHistory, history_id)
+    if not history:
+        raise HTTPException(status_code=404, detail="导入历史不存在")
+    task = db.get(ReconTask, history.task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="导入任务不存在")
+
+    rows = db.scalars(select(RawStatement).where(RawStatement.recon_task_id == task.id).order_by(RawStatement.id.asc())).all()
+    channels = {x.name: x for x in db.scalars(select(Channel)).all()}
+    games = {x.name: x for x in db.scalars(select(Game)).all()}
+    variants = {x.raw_game_name: x for x in db.scalars(select(GameVariant)).all()}
+    projects = {x.id: x for x in db.scalars(select(Project)).all()}
+    maps = {(x.channel_id, x.game_id): x for x in db.scalars(select(ChannelGameMap)).all()}
+
+    old_issues = db.scalars(select(ReconIssue).where(ReconIssue.recon_task_id == task.id)).all()
+    for issue in old_issues:
+        meta = db.scalar(select(ReconIssueMeta).where(ReconIssueMeta.issue_id == issue.id))
+        if meta:
+            db.delete(meta)
+        timelines = db.scalars(select(ReconIssueTimeline).where(ReconIssueTimeline.issue_id == issue.id)).all()
+        for tl in timelines:
+            db.delete(tl)
+        db.delete(issue)
+
+    total = len(rows)
+    matched = 0
+    unmatched = 0
+    matched_variant_count = 0
+    unmatched_variant_count = 0
+    issue_count = 0
+    amount_sum = Decimal("0")
+    new_issues: list[ReconIssue] = []
+
+    for row in rows:
+        amount_sum += Decimal(str(row.gross_amount or 0))
+        channel_name = (row.channel_name or "").strip()
+        game_name = (row.game_name or "").strip()
+        channel = channels.get(channel_name)
+        game = games.get(game_name)
+        mapping = maps.get((channel.id, game.id)) if channel and game else None
+
+        row.channel_id = channel.id if channel else None
+        row.game_id = game.id if game else None
+        row.mapping_id = mapping.id if mapping else None
+
+        rd_share = Decimal(str(game.rd_share_percent if game and game.rd_share_percent is not None else 0))
+        channel_share = (
+            Decimal(str(mapping.revenue_share_ratio or 0)) * Decimal("100")
+            if mapping and mapping.revenue_share_ratio is not None
+            else None
+        )
+        row.rd_share_percent = rd_share if game else None
+        row.channel_share_percent = channel_share
+        row.publish_share_percent = (
+            max(Decimal("0"), Decimal("100") - rd_share - channel_share) if channel_share is not None and game else None
+        )
+
+        row_issue = False
+        if not channel:
+            row_issue = True
+            new_issues.append(ReconIssue(recon_task_id=task.id, issue_type="unmatched_channel", detail=f"未匹配渠道: {channel_name}"))
+        if not game:
+            row_issue = True
+            new_issues.append(ReconIssue(recon_task_id=task.id, issue_type="unmatched_game", detail=f"未匹配游戏: {game_name}"))
+        if channel and game and not mapping:
+            row_issue = True
+            new_issues.append(
+                ReconIssue(recon_task_id=task.id, issue_type="unmapped_pair", detail=f"未映射组合: {channel_name}/{game_name}")
+            )
+
+        variant = variants.get(game_name)
+        matched_project = projects.get(variant.project_id) if variant else None
+        if variant:
+            matched_variant_count += 1
+            row.variant_id = variant.id
+            row.variant_name = variant.variant_name
+            row.project_id = matched_project.id if matched_project else None
+            row.project_name = matched_project.name if matched_project else None
+            row.rd_company = variant.rd_company
+            row.variant_match_status = "已匹配版本"
+        else:
+            unmatched_variant_count += 1
+            row.variant_id = None
+            row.variant_name = None
+            row.project_id = None
+            row.project_name = None
+            row.rd_company = None
+            row.variant_match_status = "未匹配版本"
+            row_issue = True
+            new_issues.append(ReconIssue(recon_task_id=task.id, issue_type="variant_unmatched", detail=f"版本未匹配: {game_name}"))
+
+        if row_issue:
+            row.match_status = "未匹配"
+            unmatched += 1
+        else:
+            row.match_status = "已匹配"
+            matched += 1
+
+    for issue in new_issues:
+        db.add(issue)
+    issue_count = len(new_issues)
+
+    task.status = ReconStatus.issue if issue_count > 0 else ReconStatus.pending
+    history.total_count = total
+    history.valid_count = matched
+    history.invalid_count = unmatched
+    history.matched_variant_count = matched_variant_count
+    history.unmatched_variant_count = unmatched_variant_count
+    history.amount_sum = amount_sum
+    history.status = "异常待处理" if issue_count > 0 else "待确认"
+    history.summary = f"总行数:{total}, 正常:{matched}, 异常:{unmatched}, 流水合计:{amount_sum}"
+
+    write_system_audit(
+        db,
+        ctx["user"],
+        "recompute_import_history",
+        "import_history",
+        str(history.id),
+        f"重算批次: total={total}, matched={matched}, unmatched={unmatched}, issues={issue_count}",
+    )
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"重算失败: {str(e)}")
+
+    return {"total": total, "matched": matched, "unmatched": unmatched, "issues": issue_count}
 
 
 @app.post("/imports/history/{history_id}/rematch-variants")

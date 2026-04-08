@@ -87,6 +87,7 @@ type ImportDetail = ImportBatchRow & {
   unresolved_issue_count?: number;
   resolved_issue_count?: number;
 };
+type RecomputeResp = { total: number; matched: number; unmatched: number; issues: number };
 
 const emptySummary: ImportSummary = {
   batch_count: 0,
@@ -132,6 +133,7 @@ export default function ReconTasksPage() {
   const [statsLoading, setStatsLoading] = useState(false);
   const [issues, setIssues] = useState<IssueRow[]>([]);
   const [issuesLoading, setIssuesLoading] = useState(false);
+  const [recomputingId, setRecomputingId] = useState<number | null>(null);
 
   const loadList = useCallback(
     async (pageOverride?: number) => {
@@ -223,6 +225,15 @@ export default function ReconTasksPage() {
     }
   };
 
+  const refreshDrawerIfOpen = async () => {
+    if (!drawerOpen || !activeHistoryId) return;
+    if (drawerTab === "issues") {
+      await openIssuesTab(activeHistoryId);
+    } else {
+      await loadDetailBundle(activeHistoryId, "overview");
+    }
+  };
+
   const confirmTask = (taskId: number) => {
     Modal.confirm({
       title: "确认入账",
@@ -268,6 +279,26 @@ export default function ReconTasksPage() {
     } catch (e) {
       message.error((e as Error).message);
     }
+  };
+
+  const recomputeBatch = (row: ImportBatchRow) => {
+    Modal.confirm({
+      title: "重新计算批次数据",
+      content: "将基于最新的渠道、游戏、映射及分成规则重新计算该批次数据，是否继续？",
+      onOk: async () => {
+        setRecomputingId(row.id);
+        try {
+          const resp = await apiRequest<RecomputeResp>(`/imports/history/${row.id}/recompute`, "POST");
+          message.success(`重算完成：共 ${resp.total} 条，匹配 ${resp.matched} 条，异常 ${resp.unmatched} 条`);
+          await loadList();
+          await refreshDrawerIfOpen();
+        } catch (e) {
+          message.error((e as Error).message);
+        } finally {
+          setRecomputingId(null);
+        }
+      },
+    });
   };
 
   const hasExceptions = useMemo(() => {
@@ -554,7 +585,7 @@ export default function ReconTasksPage() {
             title: "操作",
             key: "actions",
             fixed: "right",
-            width: 320,
+            width: 410,
             render: (_, r) => (
               <Space wrap size="small">
                 <Button size="small" type="link" onClick={() => void loadDetailBundle(r.id, "overview")}>
@@ -568,6 +599,9 @@ export default function ReconTasksPage() {
                 </Button>
                 <Button size="small" type="link" disabled={r.task_status === "已确认"} onClick={() => confirmTask(r.task_id)}>
                   确认入账
+                </Button>
+                <Button size="small" type="link" loading={recomputingId === r.id} onClick={() => recomputeBatch(r)}>
+                  重新计算
                 </Button>
               </Space>
             ),
