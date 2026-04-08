@@ -17,6 +17,7 @@ import pandas as pd
 import jwt
 from openpyxl import Workbook, load_workbook
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Response, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import (
@@ -1135,6 +1136,17 @@ def ensure_contract_tables():
 
 
 app = FastAPI(title="内部对账系统", version="1.0.0")
+
+# 浏览器直连后端（如合同 PDF 识别）需跨域；默认 * + 无 credentials，与 Bearer 头兼容。生产可用 CORS_ALLOW_ORIGINS 收紧。
+_cors_raw = os.getenv("CORS_ALLOW_ORIGINS", "*").strip()
+_cors_origins = [x.strip() for x in _cors_raw.split(",") if x.strip()] or ["*"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.on_event("startup")

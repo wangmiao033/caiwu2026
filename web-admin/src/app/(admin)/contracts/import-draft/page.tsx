@@ -7,7 +7,7 @@ import type { UploadProps } from "antd";
 import dayjs, { type Dayjs } from "dayjs";
 import { ArrowLeftOutlined, FilePdfOutlined, SaveOutlined, UploadOutlined } from "@ant-design/icons";
 import Link from "next/link";
-import { apiRequest } from "@/lib/api";
+import { apiRequest, apiRequestDirect } from "@/lib/api";
 import RoleGuard from "@/components/RoleGuard";
 import ContractItemsEditor from "../ContractItemsEditor";
 import {
@@ -50,6 +50,14 @@ type DraftParseOut = {
 function num(v: unknown, fallback = 0): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
+}
+
+/** 合同 PDF 直传后端（绕过 Next 函数体积分上限），须与后端 CORS 配置一致。 */
+function resolveDirectBackendBase(): string {
+  const u = (process.env.NEXT_PUBLIC_BACKEND_URL || "").trim().replace(/\/$/, "");
+  if (u) return u;
+  if (process.env.NODE_ENV === "development") return "http://127.0.0.1:8000";
+  return "";
 }
 
 function draftItemsToLocal(rows: DraftParseItem[] | undefined): LocalContractItem[] {
@@ -112,9 +120,19 @@ export default function ContractImportDraftPage() {
         }
         setParsing(true);
         try {
+          const base = resolveDirectBackendBase();
+          if (!base) {
+            message.error("未配置 NEXT_PUBLIC_BACKEND_URL，无法将 PDF 直传后端（生产环境请在部署变量中填写与后端一致的公开地址）");
+            return;
+          }
           const fd = new FormData();
           fd.append("file", file);
-          const data = await apiRequest<DraftParseOut>("/contracts/import-draft/parse", "POST", fd, true);
+          const data = await apiRequestDirect<DraftParseOut>(
+            `${base}/contracts/import-draft/parse`,
+            "POST",
+            fd,
+            true
+          );
           applyParse(data);
         } catch (e) {
           message.error((e as Error).message);
