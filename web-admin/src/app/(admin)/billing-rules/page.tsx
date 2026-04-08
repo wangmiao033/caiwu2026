@@ -2,13 +2,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { Button, Card, Form, Input, InputNumber, Modal, Select, Space, Statistic, Switch, Table, Tag, Upload, message } from "antd";
+import { Alert, Button, Card, Form, Input, InputNumber, Modal, Select, Space, Statistic, Switch, Table, Tag, Upload, message } from "antd";
 import { apiRequest } from "@/lib/api";
 import { buildExportFilename, exportRowsToXlsx } from "@/lib/export";
 import * as XLSX from "xlsx";
 import RoleGuard from "@/components/RoleGuard";
 
 type SimpleItem = { id: number; name: string };
+type GameItem = { id: number; name: string; rd_share_percent?: number };
 type MapRow = { id: number; channel: string; game: string; revenue_share_ratio: number; rd_settlement_ratio: number };
 type RuleRow = {
   key: string;
@@ -49,7 +50,7 @@ const defaultRule = (): Omit<RuleRow, "key" | "channel" | "game"> => ({
 export default function BillingRulesPage() {
   const searchParams = useSearchParams();
   const [channels, setChannels] = useState<SimpleItem[]>([]);
-  const [games, setGames] = useState<SimpleItem[]>([]);
+  const [games, setGames] = useState<GameItem[]>([]);
   const [maps, setMaps] = useState<MapRow[]>([]);
   const [rules, setRules] = useState<RuleRow[]>([]);
   const [qChannel, setQChannel] = useState<string>("");
@@ -60,6 +61,14 @@ export default function BillingRulesPage() {
   const [importRows, setImportRows] = useState<RuleRow[]>([]);
   const [onlyErrors, setOnlyErrors] = useState(false);
   const [form] = Form.useForm();
+  const watchedGame = Form.useWatch("game", form);
+
+  const rdPercentForGameName = (gameName: string) => {
+    const g = games.find((x) => x.name === gameName);
+    return Number(g?.rd_share_percent ?? 0);
+  };
+
+  const rdRatioForGameName = (gameName: string) => percentToRatio(rdPercentForGameName(gameName));
 
   useEffect(() => {
     const ch = searchParams.get("channel");
@@ -69,28 +78,73 @@ export default function BillingRulesPage() {
   }, [searchParams]);
 
   useEffect(() => {
-    apiRequest<SimpleItem[]>("/channels").then(setChannels).catch(() => {});
-    apiRequest<SimpleItem[]>("/games").then(setGames).catch(() => {});
-    apiRequest<MapRow[]>("/channel-game-map")
-      .then((data) => {
-        setMaps(data);
+    let cancelled = false;
+    (async () => {
+      try {
+        const [chRes, gmRes, mapRes] = await Promise.all([
+          apiRequest<SimpleItem[]>("/channels"),
+          apiRequest<GameItem[]>("/games"),
+          apiRequest<MapRow[]>("/channel-game-map"),
+        ]);
+        if (cancelled) return;
+        setChannels(chRes);
+        setGames(gmRes);
+        setMaps(mapRes);
+        const gameByName = new Map(gmRes.map((g) => [g.name, g]));
+        const rdFromMaster = (gameName: string) => {
+          const g = gameByName.get(gameName);
+          return percentToRatio(Number(g?.rd_share_percent ?? 0));
+        };
         const cache = localStorage.getItem("billing_rules_local");
         if (cache) {
           setRules(JSON.parse(cache));
         } else {
           setRules(
-            data.map((x) => ({
+            mapRes.map((x) => ({
               key: `${x.channel}-${x.game}`,
               channel: x.channel,
               game: x.game,
               ...defaultRule(),
-              rdShare: Number(x.rd_settlement_ratio ?? 0.5),
+              rdShare: rdFromMaster(x.game),
             }))
           );
         }
-      })
-      .catch(() => {});
+      } catch {
+        if (!cancelled) {
+          apiRequest<SimpleItem[]>("/channels").then(setChannels).catch(() => {});
+          apiRequest<GameItem[]>("/games").then(setGames).catch(() => {});
+          apiRequest<MapRow[]>("/channel-game-map")
+            .then((data) => {
+              setMaps(data);
+              const cache = localStorage.getItem("billing_rules_local");
+              if (cache) {
+                setRules(JSON.parse(cache));
+              } else {
+                setRules(
+                  data.map((x) => ({
+                    key: `${x.channel}-${x.game}`,
+                    channel: x.channel,
+                    game: x.game,
+                    ...defaultRule(),
+                    rdShare: Number(x.rd_settlement_ratio ?? 0.5),
+                  }))
+                );
+              }
+            })
+            .catch(() => {});
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    if (!watchedGame) return;
+    form.setFieldValue("rdShare", rdPercentForGameName(watchedGame));
+  }, [open, watchedGame, games, form]);
 
   const saveLocal = (next: RuleRow[]) => {
     setRules(next);
@@ -110,11 +164,12 @@ export default function BillingRulesPage() {
 
   const onEdit = (row: RuleRow) => {
     setEditingKey(row.key);
+    const rdPct = rdPercentForGameName(row.game) || ratioToPercent(row.rdShare);
     form.setFieldsValue({
       ...row,
       channelFee: ratioToPercent(row.channelFee),
       taxRate: ratioToPercent(row.taxRate),
-      rdShare: ratioToPercent(row.rdShare),
+      rdShare: rdPct,
       privateRate: ratioToPercent(row.privateRate),
     });
     setOpen(true);
@@ -125,6 +180,7 @@ export default function BillingRulesPage() {
     const channel = values.channel as string;
     const game = values.game as string;
     const key = `${channel}-${game}`;
+    const rdShareRatio = rdRatioForGameName(game);
     const item: RuleRow = {
       key,
       channel,
@@ -132,7 +188,7 @@ export default function BillingRulesPage() {
       ...values,
       channelFee: percentToRatio(Number(values.channelFee || 0)),
       taxRate: percentToRatio(Number(values.taxRate || 0)),
-      rdShare: percentToRatio(Number(values.rdShare || 0)),
+      rdShare: rdShareRatio,
       privateRate: percentToRatio(Number(values.privateRate || 0)),
     };
     const next = editingKey ? rules.map((x) => (x.key === editingKey ? item : x)) : [item, ...rules.filter((x) => x.key !== key)];
@@ -142,7 +198,7 @@ export default function BillingRulesPage() {
       await apiRequest("/billing/rules", "POST", {
         name: `${channel}-${game}-rule`,
         bill_type: "channel",
-        default_ratio: Number(values.rdShare || 0.5),
+        default_ratio: rdShareRatio,
       });
       message.success("规则已保存（并同步基础比例到后端）");
     } catch (e) {
@@ -188,15 +244,13 @@ export default function BillingRulesPage() {
       if (!["无", "0.1折", "0.05折"].includes(discountType)) errs.push("折扣类型非法");
       const cFeePercent = Number(r["通道费"] || 0);
       const tRatePercent = Number(r["税点"] || 0);
-      const rdPercent = Number(r["研发分成"] || 50);
       const pRatePercent = Number(r["私点"] || 0);
       const cFee = percentToRatio(cFeePercent);
       const tRate = percentToRatio(tRatePercent);
-      const rd = percentToRatio(rdPercent);
+      const rdRatio = rdRatioForGameName(game);
       const pRate = percentToRatio(pRatePercent);
       if (Number.isNaN(cFeePercent)) errs.push("通道费格式非法");
       if (Number.isNaN(tRatePercent)) errs.push("税点格式非法");
-      if (Number.isNaN(rdPercent)) errs.push("研发分成格式非法");
       if (Number.isNaN(pRatePercent)) errs.push("私点格式非法");
       const row: RuleRow = {
         key: `${channel}-${game}-${idx}`,
@@ -206,7 +260,7 @@ export default function BillingRulesPage() {
         discountType,
         channelFee: cFee,
         taxRate: tRate,
-        rdShare: rd,
+        rdShare: rdRatio,
         privateRate: pRate,
         ipLicense: Number(r["IP授权"] || 0),
         chaofanChannel: Number(r["超凡与渠道"] || 0),
@@ -313,6 +367,8 @@ export default function BillingRulesPage() {
     message.success("导出成功");
   };
 
+  const fromExceptionJump = Boolean(searchParams.get("channel")?.trim() || searchParams.get("game")?.trim());
+
   return (
     <RoleGuard allow={["admin", "finance_manager"]}>
       <Card
@@ -347,6 +403,15 @@ export default function BillingRulesPage() {
         </Space>
       }
     >
+      {fromExceptionJump ? (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="处理分成异常时请先核对主数据与映射"
+          description="研发分成以「游戏管理」中的研发分成(%)为准；渠道侧分成请在「渠道-游戏映射」中维护。本页规则中的研发分成仅展示游戏主数据，不可在此修改。"
+        />
+      ) : null}
       <Table
         rowKey="key"
         dataSource={filtered}
@@ -357,7 +422,11 @@ export default function BillingRulesPage() {
           { title: "折扣", dataIndex: "discountType" },
           { title: "通道费", dataIndex: "channelFee", render: (v: number) => formatRatioAsPercent(v) },
           { title: "税点", dataIndex: "taxRate", render: (v: number) => formatRatioAsPercent(v) },
-          { title: "研发分成", dataIndex: "rdShare", render: (v: number) => formatRatioAsPercent(v) },
+          {
+            title: "研发分成",
+            dataIndex: "rdShare",
+            render: (_: number, r: RuleRow) => formatRatioAsPercent(rdRatioForGameName(r.game)),
+          },
           { title: "私点", dataIndex: "privateRate", render: (v: number) => formatRatioAsPercent(v) },
           {
             title: "状态",
@@ -393,7 +462,13 @@ export default function BillingRulesPage() {
           </Form.Item>
           <Form.Item label="通道费(%)" name="channelFee"><InputNumber min={0} max={100} step={0.01} style={{ width: "100%" }} /></Form.Item>
           <Form.Item label="税点(%)" name="taxRate"><InputNumber min={0} max={100} step={0.01} style={{ width: "100%" }} /></Form.Item>
-          <Form.Item label="研发分成(%)" name="rdShare"><InputNumber min={0} max={100} step={0.01} style={{ width: "100%" }} /></Form.Item>
+          <Form.Item
+            label="研发分成(%)"
+            name="rdShare"
+            tooltip="来自游戏主数据，不能在此修改"
+          >
+            <InputNumber min={0} max={100} step={0.01} style={{ width: "100%" }} disabled readOnly />
+          </Form.Item>
           <Form.Item label="私点(%)" name="privateRate"><InputNumber min={0} max={100} step={0.01} style={{ width: "100%" }} /></Form.Item>
           <Form.Item label="IP授权（预留）" name="ipLicense"><InputNumber min={0} step={0.01} style={{ width: "100%" }} /></Form.Item>
           <Form.Item label="超凡与渠道（预留）" name="chaofanChannel"><InputNumber min={0} step={0.01} style={{ width: "100%" }} /></Form.Item>
