@@ -199,6 +199,11 @@ export default function ChannelGameMapPage() {
       ? Number((channelSharePercent + rdSharePercent + publishSharePercent).toFixed(2))
       : undefined;
 
+  const filterOptionContains = (input: string, option?: { label?: unknown; value?: unknown }) => {
+    const label = String(option?.label ?? "");
+    return label.toLowerCase().includes((input || "").toLowerCase());
+  };
+
   return (
     <RoleGuard allow={["admin", "finance_manager", "tech"]}>
       <Card
@@ -298,10 +303,24 @@ export default function ChannelGameMapPage() {
       <Modal open={open} title={editing ? "编辑映射" : "新增映射"} onCancel={() => setOpen(false)} onOk={submit}>
         <Form form={form} layout="vertical">
           <Form.Item name="channel_id" label="渠道" rules={[{ required: true }]}>
-            <Select options={channels.map((x) => ({ label: x.name, value: x.id }))} />
+            <Select
+              allowClear
+              showSearch
+              placeholder="请选择渠道（支持搜索/粘贴关键字）"
+              options={channels.map((x) => ({ label: x.name, value: x.id }))}
+              optionFilterProp="label"
+              filterOption={filterOptionContains}
+            />
           </Form.Item>
           <Form.Item name="game_id" label="游戏" rules={[{ required: true }]}>
-            <Select options={games.map((x) => ({ label: x.name, value: x.id }))} />
+            <Select
+              allowClear
+              showSearch
+              placeholder="请选择游戏（支持搜索/粘贴关键字）"
+              options={games.map((x) => ({ label: x.name, value: x.id }))}
+              optionFilterProp="label"
+              filterOption={filterOptionContains}
+            />
           </Form.Item>
           <Form.Item name="revenue_share_ratio" label="渠道分成(%)" rules={[{ required: true }]}>
             <InputNumber min={0} max={100} step={0.01} style={{ width: "100%" }} />
