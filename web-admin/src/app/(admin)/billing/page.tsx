@@ -99,6 +99,7 @@ export default function BillingPage() {
   });
   const [sendingId, setSendingId] = useState<number | null>(null);
   const [discardingId, setDiscardingId] = useState<number | null>(null);
+  const [bulkDiscarding, setBulkDiscarding] = useState(false);
   const [detail, setDetail] = useState<BillDetail | null>(null);
   const [showTrial, setShowTrial] = useState(parseBool(searchParams.get("show_trial"), false));
   const [reconMode, setReconMode] = useState(parseBool(searchParams.get("recon_mode"), true));
@@ -228,6 +229,10 @@ export default function BillingPage() {
     window.open(`/billing?bill_id=${id}&period=${encodeURIComponent(period)}`, "_blank", "noopener,noreferrer");
   };
 
+  useEffect(() => {
+    setSelectedRowKeys([]);
+  }, [period, filterText, filterType, billLifecycle, currentPage, pageSize, reconMode, showTrial]);
+
   const filtered = useMemo(
     () => list.filter((x) => `${x.id}${x.target_name}${x.period}`.toLowerCase().includes(filterText.toLowerCase())),
     [list, filterText]
@@ -284,6 +289,46 @@ export default function BillingPage() {
     () => rowsWithTrial.filter((x) => selectedRowKeys.includes(String(x.id))),
     [rowsWithTrial, selectedRowKeys]
   );
+
+  const bulkDiscardBills = () => {
+    const targets = selectedRows.filter((b) => canDiscardBill(b));
+    if (!targets.length) {
+      message.warning("所选账单均不满足作废条件（仅支持测试草稿账单）");
+      return;
+    }
+    Modal.confirm({
+      title: "批量作废账单",
+      content: "将把所选账单标记为作废，不再参与默认列表和后续流程，是否继续？",
+      okType: "danger",
+      onOk: async () => {
+        setBulkDiscarding(true);
+        const okIds: number[] = [];
+        const failed: Array<{ id: number; reason: string }> = [];
+        for (const b of targets) {
+          try {
+            // 串行调用，优先稳定
+            await apiRequest(`/billing/${b.id}/discard`, "POST");
+            okIds.push(b.id);
+          } catch (e) {
+            const reason = (e as Error).message || "unknown";
+            failed.push({ id: b.id, reason });
+          }
+        }
+        if (failed.length === 0) {
+          message.success(`已作废 ${okIds.length} 条`);
+        } else {
+          const preview = failed
+            .slice(0, 5)
+            .map((x) => `#${x.id}:${x.reason}`)
+            .join("；");
+          message.warning(`成功 ${okIds.length} 条，失败 ${failed.length} 条${preview ? `（${preview}${failed.length > 5 ? "…" : ""}）` : ""}`);
+        }
+        setSelectedRowKeys([]);
+        await loadBills();
+        setBulkDiscarding(false);
+      },
+    });
+  };
 
   const gotoBatchReceipt = () => {
     if (!selectedRows.length) {
@@ -444,6 +489,14 @@ export default function BillingPage() {
                 清理重复草稿账单
               </Button>
             )}
+            <Button
+              danger
+              disabled={selectedRowKeys.length === 0 || bulkDiscarding}
+              loading={bulkDiscarding}
+              onClick={bulkDiscardBills}
+            >
+              批量作废
+            </Button>
             <Tooltip title="后端暂无批量直接置已回款接口，需先登记回款；这里支持批量跳转。">
               <Button onClick={gotoBatchReceipt}>批量标记已回款</Button>
             </Tooltip>
@@ -486,7 +539,10 @@ export default function BillingPage() {
             current: currentPage,
             pageSize,
             showSizeChanger: false,
-            onChange: (page) => setCurrentPage(page),
+            onChange: (page) => {
+              setCurrentPage(page);
+              setSelectedRowKeys([]);
+            },
           }}
           locale={{ emptyText: <Empty description="暂无账单数据，请先生成或调整筛选条件" /> }}
           columns={
