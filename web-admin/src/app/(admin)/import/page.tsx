@@ -512,6 +512,8 @@ export default function ImportPage() {
     Modal.confirm({
       title: "确认导入",
       content: `确认将文件 ${selectedFileName || selectedFile.name} 导入账期 ${period} 吗？`,
+      okText: "确认",
+      cancelText: "取消",
       onOk: async () => {
         const hide = message.loading("正在上传并导入...", 0);
         const formData = new FormData();
@@ -559,6 +561,8 @@ export default function ImportPage() {
     Modal.confirm({
       title: "确认导入",
       content: "确认提交手动录入数据？",
+      okText: "确认",
+      cancelText: "取消",
       onOk: async () => {
         try {
           const data = await apiRequestDirect<Record<string, unknown>>("/api/recon/manual", "POST", {
@@ -724,6 +728,8 @@ export default function ImportPage() {
     Modal.confirm({
       title: "确认导入",
       content: `将导入 ${validRows.length} 行有效数据，是否继续？`,
+      okText: "确认",
+      cancelText: "取消",
       onOk: async () => {
         try {
           const data = await apiRequestDirect<Record<string, unknown>>("/api/recon/extract", "POST", { period, rows: validRows });
