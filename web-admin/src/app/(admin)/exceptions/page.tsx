@@ -144,6 +144,7 @@ export default function ExceptionsPage() {
   const [detail, setDetail] = useState<UnifiedExceptionRow | null>(null);
   const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
   const [bulkResolving, setBulkResolving] = useState(false);
+  const [bulkRecomputing, setBulkRecomputing] = useState(false);
   const [recomputeId, setRecomputeId] = useState<string | null>(null);
 
   const loadData = async () => {
@@ -262,6 +263,64 @@ export default function ExceptionsPage() {
 
   const updateOneStatus = async (row: UnifiedExceptionRow, target: ExceptionStatusText) => {
     await updateExceptionStatus({ type: row.type, id: row.id, status: toStatusValue(target) });
+  };
+
+  const collectRecomputeHistoryIds = (selected: UnifiedExceptionRow[]): number[] => {
+    const byTask = new Map<number, number>();
+    const noTaskHistoryIds = new Set<number>();
+    for (const row of selected) {
+      if (!row.importHistoryId) continue;
+      if (row.taskId) {
+        if (!byTask.has(row.taskId)) byTask.set(row.taskId, row.importHistoryId);
+      } else {
+        noTaskHistoryIds.add(row.importHistoryId);
+      }
+    }
+    return [...new Set([...byTask.values(), ...noTaskHistoryIds])];
+  };
+
+  const handleBulkRecompute = () => {
+    const selected = filteredRows.filter((x) => selectedRowKeys.includes(x.key));
+    if (!selected.length) {
+      message.warning("请先选择异常");
+      return;
+    }
+    const historyIds = collectRecomputeHistoryIds(selected);
+    if (!historyIds.length) {
+      message.warning("所选异常均未关联导入批次，无法重算");
+      return;
+    }
+    Modal.confirm({
+      title: "批量重算所属批次",
+      content: `将对选中异常涉及的批次进行去重后重算（共 ${historyIds.length} 个批次），是否继续？`,
+      okText: "确认",
+      cancelText: "取消",
+      onOk: async () => {
+        setBulkRecomputing(true);
+        let ok = 0;
+        const failures: string[] = [];
+        try {
+          for (const id of historyIds) {
+            try {
+              await apiRequest(`/imports/history/${id}/recompute`, "POST");
+              ok += 1;
+            } catch (error) {
+              failures.push(`#${id}: ${(error as Error).message || "重算失败"}`);
+            }
+          }
+          const fail = failures.length;
+          if (fail === 0) {
+            message.success(`已重算 ${ok} 个批次`);
+          } else {
+            message.warning(`成功 ${ok}，失败 ${fail}：${failures.slice(0, 5).join("；")}`);
+          }
+          setSelectedRowKeys([]);
+          await loadData();
+        } finally {
+          setBulkRecomputing(false);
+        }
+      },
+    });
   };
 
   const handleBulkResolve = () => {
@@ -401,6 +460,9 @@ export default function ExceptionsPage() {
                 批量标记已处理
               </Button>
             ) : null}
+            <Button disabled={!selectedRowKeys.length || bulkRecomputing} loading={bulkRecomputing} onClick={handleBulkRecompute}>
+              批量重算所属批次
+            </Button>
           </Space>
         </Space>
       </Card>
@@ -410,7 +472,7 @@ export default function ExceptionsPage() {
           rowKey="key"
           loading={loading}
           dataSource={filteredRows}
-          rowSelection={canUpdate ? { selectedRowKeys, onChange: (keys) => setSelectedRowKeys(keys.map((k) => String(k))) } : undefined}
+          rowSelection={{ selectedRowKeys, onChange: (keys) => setSelectedRowKeys(keys.map((k) => String(k))) }}
           locale={{ emptyText: "暂无异常数据" }}
           pagination={{ pageSize: 20 }}
           columns={[
