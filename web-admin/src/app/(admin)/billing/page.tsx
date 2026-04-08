@@ -55,11 +55,27 @@ type BillDetail = BillRow & {
   };
 };
 
+const BILLING_LAST_PERIOD_KEY = "billing_last_period";
+const PERIOD_YM_RE = /^\d{4}-\d{2}$/;
+
 function getCurrentPeriod(): string {
   const now = new Date();
   const y = now.getFullYear();
   const m = String(now.getMonth() + 1).padStart(2, "0");
   return `${y}-${m}`;
+}
+
+function getRecentPeriodOptions(count = 6): { label: string; value: string }[] {
+  const out: { label: string; value: string }[] = [];
+  const d = new Date();
+  for (let i = 0; i < count; i += 1) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const value = `${y}-${m}`;
+    out.push({ label: value, value });
+    d.setMonth(d.getMonth() - 1);
+  }
+  return out;
 }
 
 function parseBool(raw: string | null, defaultValue: boolean): boolean {
@@ -72,7 +88,7 @@ function parseBool(raw: string | null, defaultValue: boolean): boolean {
 export default function BillingPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [period, setPeriod] = useState(searchParams.get("period") || getCurrentPeriod());
+  const [period, setPeriod] = useState(getCurrentPeriod());
   const [list, setList] = useState<BillRow[]>([]);
   const [filterType, setFilterType] = useState<string>(searchParams.get("type") || "");
   const [filterText, setFilterText] = useState(searchParams.get("keyword") || "");
@@ -85,7 +101,9 @@ export default function BillingPage() {
   const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
   const [rules, setRules] = useState<BillingRule[]>([]);
   const [exportFormat, setExportFormat] = useState<"xlsx" | "csv">("xlsx");
-  const initedRef = useRef(false);
+  const billingBootstrappedRef = useRef(false);
+  const lastUrlPeriodRef = useRef<string | null>(null);
+  const recentPeriodOptions = useMemo(() => getRecentPeriodOptions(6), []);
 
   useEffect(() => {
     const cache = localStorage.getItem("billing_rules_local");
@@ -125,6 +143,21 @@ export default function BillingPage() {
     } catch (e) {
       message.error((e as Error).message);
     }
+  };
+
+  const applyPeriod = async (nextRaw: string) => {
+    const next = nextRaw.trim();
+    if (!PERIOD_YM_RE.test(next)) {
+      message.warning("账期格式应为 YYYY-MM");
+      return;
+    }
+    setPeriod(next);
+    try {
+      localStorage.setItem(BILLING_LAST_PERIOD_KEY, next);
+    } catch {
+      /* ignore */
+    }
+    await loadBills({ period: next });
   };
 
   const sendBill = async (id: number, status: string) => {
@@ -248,14 +281,40 @@ export default function BillingPage() {
   };
 
   useEffect(() => {
+    const q = searchParams.get("period")?.trim() ?? "";
+    const validQ = PERIOD_YM_RE.test(q);
     const billId = Number(searchParams.get("bill_id") || 0);
-    loadBills({ period, billIdToOpen: billId > 0 ? billId : null });
-    initedRef.current = true;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+
+    if (!billingBootstrappedRef.current) {
+      let p = getCurrentPeriod();
+      if (validQ) {
+        p = q;
+        lastUrlPeriodRef.current = q;
+      } else {
+        lastUrlPeriodRef.current = null;
+        try {
+          const s = localStorage.getItem(BILLING_LAST_PERIOD_KEY)?.trim() ?? "";
+          if (PERIOD_YM_RE.test(s)) p = s;
+        } catch {
+          /* ignore */
+        }
+      }
+      setPeriod(p);
+      void loadBills({ period: p, billIdToOpen: billId > 0 ? billId : null });
+      billingBootstrappedRef.current = true;
+      return;
+    }
+
+    if (validQ && lastUrlPeriodRef.current !== q) {
+      lastUrlPeriodRef.current = q;
+      setPeriod(q);
+      void loadBills({ period: q, billIdToOpen: billId > 0 ? billId : null });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- searchParams 变化时按 URL 账期同步；loadBills 依赖当前 filterType
+  }, [searchParams]);
 
   useEffect(() => {
-    if (!initedRef.current) return;
+    if (!billingBootstrappedRef.current) return;
     const params = new URLSearchParams();
     if (period) params.set("period", period);
     if (filterText) params.set("keyword", filterText);
@@ -266,13 +325,39 @@ export default function BillingPage() {
     if (currentPage !== 1) params.set("page", String(currentPage));
     if (detail?.id) params.set("bill_id", String(detail.id));
     router.replace(`/billing${params.toString() ? `?${params.toString()}` : ""}`);
+    if (PERIOD_YM_RE.test(period)) {
+      try {
+        localStorage.setItem(BILLING_LAST_PERIOD_KEY, period);
+      } catch {
+        /* ignore */
+      }
+    }
   }, [period, filterText, filterType, reconMode, showTrial, pageSize, currentPage, detail?.id, router]);
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
       <Card title="账单生成">
-        <Space>
-          <Input value={period} onChange={(e) => setPeriod(e.target.value)} placeholder="账期 2026-03" />
+        <Space wrap>
+          <Input
+            value={period}
+            onChange={(e) => setPeriod(e.target.value)}
+            onBlur={() => {
+              const t = period.trim();
+              if (PERIOD_YM_RE.test(t)) void applyPeriod(t);
+            }}
+            placeholder="账期 YYYY-MM"
+            style={{ width: 130 }}
+          />
+          <Select
+            placeholder="最近账期"
+            allowClear
+            style={{ width: 150 }}
+            options={recentPeriodOptions}
+            value={recentPeriodOptions.some((o) => o.value === period) ? period : undefined}
+            onChange={(v) => {
+              if (v) void applyPeriod(v);
+            }}
+          />
           <Button type="primary" onClick={generate}>
             生成账单
           </Button>
