@@ -74,8 +74,8 @@ export default function ContractNewPage() {
           </Button>
         </Space>
         <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-          独立录入页便于长表单与后续对接 PDF 识别草稿（<Link href="/contracts/import-draft">/contracts/import-draft</Link>
-          预留入口）。不与当前规则配置强绑定。
+          独立录入页便于长表单。若持有渠道合同 PDF，可直接进入{" "}
+          <Link href="/contracts/import-draft">PDF 合同识别录入</Link>（/contracts/import-draft）生成草稿后保存。
         </Typography.Paragraph>
 
         <Form

@@ -5,6 +5,7 @@ import enum
 import io
 import json
 import os
+import re
 import tempfile
 from decimal import Decimal
 from urllib import error as url_error
@@ -607,6 +608,33 @@ class ContractItemIn(BaseModel):
     private_percent: Decimal = Decimal("0")
     rd_share_note: str = ""
     is_active: bool = True
+
+
+class ContractDraftItemOut(BaseModel):
+    game_name: str = ""
+    discount_label: str = ""
+    discount_rate: Decimal = Decimal("0")
+    channel_share_percent: Decimal = Decimal("0")
+    channel_fee_percent: Decimal = Decimal("0")
+    tax_percent: Decimal = Decimal("0")
+    private_percent: Decimal = Decimal("0")
+    rd_share_note: str = ""
+    is_active: bool = True
+
+
+class ContractDraftParseOut(BaseModel):
+    contract_no: str = ""
+    contract_name: str = ""
+    channel_name: str = ""
+    platform_party_name: str = ""
+    platform_party_address: str = ""
+    developer_party_name: str = ""
+    developer_party_address: str = ""
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    status: str = "draft"
+    remark: str = ""
+    items: list[ContractDraftItemOut] = Field(default_factory=list)
 
 
 class RuleBulkRow(BaseModel):
@@ -1510,6 +1538,198 @@ def delete_contract_item(
     write_system_audit(db, ctx["user"], "delete_contract_item", "contract_item", str(item_id), f"合同{cid} 删除明细")
     db.commit()
     return {"id": item_id, "deleted": True}
+
+
+def _pdf_extract_text(data: bytes) -> str:
+    try:
+        from pypdf import PdfReader
+    except ImportError as e:
+        raise HTTPException(
+            status_code=500,
+            detail="服务端未安装 PDF 解析依赖 pypdf，无法解析。请在 backend 执行 pip install -r requirements.txt",
+        ) from e
+    try:
+        reader = PdfReader(io.BytesIO(data))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"无法读取 PDF：{e}") from e
+    parts: list[str] = []
+    for page in reader.pages:
+        parts.append(page.extract_text() or "")
+    return "\n".join(parts)
+
+
+def _re_field(text: str, patterns: list[str]) -> str:
+    for pat in patterns:
+        m = re.search(pat, text, re.MULTILINE | re.DOTALL)
+        if m:
+            v = m.group(1).strip()
+            v = re.sub(r"\s+", " ", v)
+            if v:
+                return v
+    return ""
+
+
+def _parse_contract_dates(text: str) -> tuple[Optional[str], Optional[str]]:
+    m = re.search(
+        r"自\s*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*起?\s*至\s*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日止?",
+        text,
+    )
+    if m:
+        a = f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+        b = f"{m.group(4)}-{int(m.group(5)):02d}-{int(m.group(6)):02d}"
+        return a, b
+    dates: list[str] = []
+    for g in re.finditer(r"(20\d{2}|19\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", text):
+        dates.append(f"{g.group(1)}-{int(g.group(2)):02d}-{int(g.group(3)):02d}")
+    for g in re.finditer(r"(20\d{2}|19\d{2})[./-](\d{1,2})[./-](\d{1,2})", text):
+        dates.append(f"{g.group(1)}-{int(g.group(2)):02d}-{int(g.group(3)):02d}")
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for d in dates:
+        if d not in seen:
+            seen.add(d)
+            uniq.append(d)
+    if len(uniq) >= 2:
+        return uniq[0], uniq[1]
+    if len(uniq) == 1:
+        return uniq[0], None
+    return None, None
+
+
+def _clamp_pct(d: Decimal) -> Decimal:
+    if d < 0:
+        return Decimal("0")
+    if d > 100:
+        return Decimal("100")
+    return d
+
+
+def _try_parse_item_line(line: str) -> Optional[ContractDraftItemOut]:
+    s = line.strip()
+    if len(s) < 6 or s.startswith(("注：", "说明：", "附件：", "——", "--", "序号")):
+        return None
+    nums = re.findall(r"\d+(?:\.\d+)?", s)
+    if len(nums) < 4:
+        return None
+    m = re.match(r"^([^\d:：]{2,28}?)\s*[:：]?\s*\d", s)
+    if not m:
+        m = re.match(r"^([^\d|｜\t]{2,28}?)[\s|｜\t]", s)
+    if not m:
+        return None
+    game = re.sub(r"^[（(]?\d+[）).\s]+", "", m.group(1).strip())
+    game = game.strip("·- ：:")
+    if len(game) < 2:
+        return None
+    try:
+        vals = [Decimal(x) for x in nums[:6]]
+    except Exception:
+        return None
+    if len(vals) >= 6:
+        dr, cs, cf, tx, pv = vals[0], vals[1], vals[2], vals[3], vals[4]
+    elif len(vals) >= 5:
+        dr, cs, cf, tx, pv = Decimal("0"), vals[0], vals[1], vals[2], vals[3]
+    else:
+        return None
+    return ContractDraftItemOut(
+        game_name=game,
+        discount_label="",
+        discount_rate=_clamp_pct(dr),
+        channel_share_percent=_clamp_pct(cs),
+        channel_fee_percent=_clamp_pct(cf),
+        tax_percent=_clamp_pct(tx),
+        private_percent=_clamp_pct(pv),
+    )
+
+
+def _parse_contract_items_heuristic(text: str) -> list[ContractDraftItemOut]:
+    items: list[ContractDraftItemOut] = []
+    for line in text.splitlines():
+        it = _try_parse_item_line(line)
+        if it and it.game_name:
+            if items and items[-1].game_name == it.game_name:
+                continue
+            items.append(it)
+    return items[:50]
+
+
+def parse_contract_draft_from_pdf_bytes(data: bytes) -> ContractDraftParseOut:
+    text = _pdf_extract_text(data)
+    text = text.strip()
+    base_remark = "由 PDF 自动识别生成，请人工核对后再保存。"
+    if not text:
+        return ContractDraftParseOut(
+            platform_party_name="广州熊动科技有限公司",
+            remark=base_remark + "（未提取到文本，可能为扫描件或加密 PDF。）",
+            status="draft",
+        )
+    t = text
+    contract_no = _re_field(
+        t,
+        [
+            r"合同编号[：:\s]*([A-Za-z0-9\-_\.【】\[\]《》\u4e00-\u9fff]{2,50})",
+            r"协议编号[：:\s]*([A-Za-z0-9\-_\.【】\[\]《》\u4e00-\u9fff]{2,50})",
+        ],
+    )
+    contract_name = _re_field(
+        t,
+        [
+            r"《\s*([^》\n]{2,80}?)》",
+            r"合同名称[：:\s]*([^\n]{2,80})",
+            r"协议名称[：:\s]*([^\n]{2,80})",
+        ],
+    )
+    party_a = _re_field(
+        t,
+        [
+            r"甲方[（(][^）)]*[）)]?\s*[：:]([^\n]{2,120})",
+            r"甲方\s*[：:]\s*([^\n]{2,120})",
+        ],
+    )
+    party_b = _re_field(
+        t,
+        [
+            r"乙方[（(][^）)]*[）)]?\s*[：:]([^\n]{2,120})",
+            r"乙方\s*[：:]\s*([^\n]{2,120})",
+        ],
+    )
+    addr_a = _re_field(t, [r"甲方地址\s*[：:]\s*([^\n]+)", r"住所地\s*[：:]\s*([^\n]+)"])
+    addr_b = _re_field(t, [r"乙方地址\s*[：:]\s*([^\n]+)"])
+    channel = _re_field(t, [r"渠道(?:名称)?\s*[：:]\s*([^\n]{2,60})", r"合作方\s*[：:]\s*([^\n]{2,60})"])
+    sd, ed = _parse_contract_dates(t)
+    channel_name = (channel or party_b or "").strip()
+    platform_party_name = (party_a or "广州熊动科技有限公司").strip() or "广州熊动科技有限公司"
+    developer_party_name = (party_b or "").strip()
+    items = _parse_contract_items_heuristic(t)
+    return ContractDraftParseOut(
+        contract_no=contract_no,
+        contract_name=contract_name,
+        channel_name=channel_name,
+        platform_party_name=platform_party_name,
+        platform_party_address=addr_a.strip(),
+        developer_party_address=addr_b.strip(),
+        developer_party_name=developer_party_name,
+        start_date=sd,
+        end_date=ed,
+        status="draft",
+        remark=base_remark,
+        items=items,
+    )
+
+
+@app.post("/contracts/import-draft/parse", response_model=ContractDraftParseOut)
+async def parse_contract_import_draft(
+    file: UploadFile = File(...),
+    _: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech])),
+):
+    name = (file.filename or "").lower()
+    if not name.endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="请上传 PDF 文件")
+    raw = await file.read()
+    if len(raw) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="文件大小不能超过 10MB")
+    if not raw:
+        raise HTTPException(status_code=400, detail="空文件")
+    return parse_contract_draft_from_pdf_bytes(raw)
 
 
 @app.post("/games")
