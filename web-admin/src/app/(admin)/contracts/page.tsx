@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button, Card, Input, Select, Space, Table, Tag, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { PlusOutlined } from "@ant-design/icons";
+import { FileExcelOutlined, PlusOutlined } from "@ant-design/icons";
 import { apiRequest } from "@/lib/api";
 import RoleGuard from "@/components/RoleGuard";
 import { hasRole } from "@/lib/rbac";
@@ -109,9 +109,14 @@ export default function ContractsListPage() {
         title="合同管理"
         extra={
           canMutate ? (
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => router.push("/contracts/new")}>
-              新建合同
-            </Button>
+            <Space>
+              <Button icon={<FileExcelOutlined />} onClick={() => router.push("/contracts/import-excel")}>
+                Excel导入合同
+              </Button>
+              <Button type="primary" icon={<PlusOutlined />} onClick={() => router.push("/contracts/new")}>
+                新建合同
+              </Button>
+            </Space>
           ) : null
         }
       >

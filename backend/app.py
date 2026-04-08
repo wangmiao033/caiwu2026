@@ -4,6 +4,7 @@ import datetime as dt
 import enum
 import io
 import json
+import uuid
 import os
 import re
 import tempfile
@@ -636,6 +637,51 @@ class ContractDraftParseOut(BaseModel):
     status: str = "draft"
     remark: str = ""
     items: list[ContractDraftItemOut] = Field(default_factory=list)
+
+
+class ContractExcelPreviewRow(BaseModel):
+    excel_row: int
+    contract_no: str
+    contract_name: str
+    channel_name: str
+    developer_party_name: str = ""
+    platform_party_name: str = "广州熊动科技有限公司"
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    attachment_preview: str = ""
+    remark: str = ""
+    status: str = "ready"
+    issues: list[str] = Field(default_factory=list)
+    duplicate_hint: bool = False
+
+
+class ContractExcelPreviewOut(BaseModel):
+    rows: list[ContractExcelPreviewRow]
+    file_label: str = ""
+
+
+class ContractExcelCommitItem(BaseModel):
+    contract_no: str
+    contract_name: str
+    channel_name: str
+    developer_party_name: str = ""
+    platform_party_name: str = "广州熊动科技有限公司"
+    platform_party_address: str = ""
+    developer_party_address: str = ""
+    start_date: str
+    end_date: str
+    remark: str = ""
+
+
+class ContractExcelCommitIn(BaseModel):
+    items: list[ContractExcelCommitItem]
+
+
+class ContractExcelCommitOut(BaseModel):
+    created: int = 0
+    skipped: int = 0
+    created_ids: list[int] = Field(default_factory=list)
+    skip_reasons: list[str] = Field(default_factory=list)
 
 
 class RuleBulkRow(BaseModel):
@@ -1742,6 +1788,353 @@ async def parse_contract_import_draft(
     if not raw:
         raise HTTPException(status_code=400, detail="空文件")
     return parse_contract_draft_from_pdf_bytes(raw)
+
+
+_CONTRACT_EXCEL_SYNONYMS: dict[str, list[str]] = {
+    "contract_no": ["合同编号", "协议编号", "编号"],
+    "contract_name": ["合同名称", "合同名"],
+    "contract_type": ["合同类型", "类型"],
+    "sign_party": ["合同签约方", "签约方", "对方", "乙方", "客户名称", "合作方"],
+    "channel_short": ["渠道简称", "渠道"],
+    "start_date": ["签约日期", "开始日期", "生效日期", "起始日期"],
+    "end_date": ["终止日期", "结束日期", "到期日", "截止日期"],
+    "account_type": ["账款类型"],
+    "attachment": ["合同附件", "附件"],
+    "share_ratio": ["分成比例", "分成", "渠道分成", "分成%", "分成比例%"],
+}
+
+
+def _contract_excel_strip_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def _contract_excel_find_column(df: pd.DataFrame, key: str) -> Optional[str]:
+    syns = _CONTRACT_EXCEL_SYNONYMS.get(key, [])
+    cols = [str(c).strip() for c in df.columns]
+    colset = {c: c for c in cols}
+    for s in syns:
+        if s in colset:
+            return s
+    for s in syns:
+        for c in cols:
+            if s == c or (len(s) >= 2 and s in c):
+                return c
+    return None
+
+
+def _contract_excel_cell_str(val: object) -> str:
+    if val is None:
+        return ""
+    if isinstance(val, float) and pd.isna(val):
+        return ""
+    if isinstance(val, dt.datetime):
+        return val.date().isoformat()
+    if isinstance(val, dt.date):
+        return val.isoformat()
+    return str(val).strip()
+
+
+def _contract_excel_parse_date(val: object) -> Optional[dt.date]:
+    if val is None:
+        return None
+    if isinstance(val, float) and pd.isna(val):
+        return None
+    if isinstance(val, dt.datetime):
+        return val.date()
+    if isinstance(val, dt.date):
+        return val
+    s = str(val).strip()
+    if not s:
+        return None
+    ts = pd.to_datetime(s, errors="coerce")
+    if pd.isna(ts):
+        return None
+    try:
+        return ts.date()
+    except Exception:
+        return None
+
+
+def _contract_excel_read_frame(filename: str, raw: bytes) -> pd.DataFrame:
+    low = (filename or "").lower()
+    bio = io.BytesIO(raw)
+    if low.endswith(".csv"):
+        return _contract_excel_strip_cols(pd.read_csv(bio))
+    if low.endswith(".xlsx"):
+        return _contract_excel_strip_cols(pd.read_excel(bio, engine="openpyxl"))
+    raise HTTPException(status_code=400, detail="仅支持 .xlsx 或 .csv")
+
+
+def _contract_excel_build_remark(
+    *,
+    contract_type: str,
+    account_type: str,
+    attachment: str,
+    share_ratio: str,
+    start_note: str,
+) -> str:
+    parts: list[str] = []
+    if contract_type:
+        parts.append(f"合同类型(Excel): {contract_type}")
+    if account_type:
+        parts.append(f"账款类型: {account_type}")
+    if attachment:
+        parts.append(f"合同附件: {attachment}")
+    if share_ratio:
+        parts.append(f"分成比例(Excel): {share_ratio}")
+    if start_note:
+        parts.append(start_note)
+    parts.append("来源: Excel 台账批量导入（草稿）")
+    text = "\n".join(parts)
+    return text[:1000]
+
+
+def _contract_excel_preview_from_file(
+    filename: str, raw: bytes, db: Session
+) -> ContractExcelPreviewOut:
+    df = _contract_excel_read_frame(filename, raw)
+    if df.empty or len(df.columns) == 0:
+        raise HTTPException(status_code=400, detail="表格为空或无法识别表头")
+
+    def col(key: str) -> Optional[str]:
+        return _contract_excel_find_column(df, key)
+
+    c_name_col = col("contract_name")
+    cno_col = col("contract_no")
+    sign_col = col("sign_party")
+    ch_col = col("channel_short")
+    sd_col = col("start_date")
+    ed_col = col("end_date")
+    type_col = col("contract_type")
+    acc_col = col("account_type")
+    att_col = col("attachment")
+    share_col = col("share_ratio")
+
+    preview_rows: list[ContractExcelPreviewRow] = []
+    triplet_counts: dict[tuple[str, str, str], int] = {}
+
+    for i in range(len(df)):
+        excel_row = i + 2
+        row = df.iloc[i]
+        def get(col_name: Optional[str]) -> str:
+            if not col_name or col_name not in df.columns:
+                return ""
+            return _contract_excel_cell_str(row.get(col_name))
+
+        contract_name = get(c_name_col).strip()
+        contract_no_excel = get(cno_col).strip()
+        sign_party = get(sign_col).strip()
+        channel_short = get(ch_col).strip()
+        channel_name = channel_short or sign_party
+        developer_party_name = sign_party
+        type_text = get(type_col).strip()
+        account_type = get(acc_col).strip()
+        attachment = get(att_col).strip()
+        share_raw = get(share_col).strip()
+
+        start_d = _contract_excel_parse_date(row.get(sd_col)) if sd_col else None
+        end_d = _contract_excel_parse_date(row.get(ed_col)) if ed_col else None
+
+        no_data = not contract_name and not channel_name and not sign_party and end_d is None
+        if no_data:
+            continue
+
+        issues: list[str] = []
+        status = "ready"
+        if not contract_name:
+            issues.append("合同名称不能为空")
+            status = "skip"
+        party_ok = bool((channel_short or sign_party).strip())
+        if not party_ok:
+            issues.append("对方/签约方不能为空（请填签约方或渠道简称）")
+            status = "skip"
+        if end_d is None:
+            issues.append("终止日期缺失或无法解析")
+            status = "skip"
+
+        start_note = ""
+        if sd_col and row.get(sd_col) is not None and str(row.get(sd_col)).strip():
+            raw_sd = _contract_excel_cell_str(row.get(sd_col))
+            if start_d is None:
+                start_note = f"签约日期(原始): {raw_sd}（未能解析为日期，开始日期待人工核对）"
+            else:
+                start_note = f"签约日期(Excel列): {raw_sd}"
+        if start_d is None:
+            start_d = dt.date.today()
+
+        if status != "skip" and end_d is not None and end_d < start_d:
+            issues.append("结束日期早于开始日期")
+            status = "skip"
+
+        remark = _contract_excel_build_remark(
+            contract_type=type_text,
+            account_type=account_type,
+            attachment=attachment,
+            share_ratio=share_raw,
+            start_note=start_note,
+        )
+
+        imp_id = uuid.uuid4().hex[:8].upper()
+        proposed_no = (contract_no_excel or "").strip()
+        if not proposed_no:
+            proposed_no = f"IMP-{dt.date.today().strftime('%Y%m%d')}-{excel_row:04d}-{imp_id}"
+        elif len(proposed_no) > 75:
+            proposed_no = proposed_no[:75]
+
+        dup_key = (
+            contract_name.strip(),
+            channel_name.strip(),
+            end_d.isoformat() if end_d else "",
+        )
+        if status != "skip" and dup_key[2]:
+            triplet_counts[dup_key] = triplet_counts.get(dup_key, 0) + 1
+
+        preview_rows.append(
+            ContractExcelPreviewRow(
+                excel_row=excel_row,
+                contract_no=proposed_no,
+                contract_name=contract_name,
+                channel_name=channel_name.strip(),
+                developer_party_name=developer_party_name,
+                platform_party_name="广州熊动科技有限公司",
+                start_date=start_d.isoformat() if start_d else None,
+                end_date=end_d.isoformat() if end_d else None,
+                attachment_preview=(attachment[:200] + "…") if len(attachment) > 200 else attachment,
+                remark=remark,
+                status=status,
+                issues=issues,
+                duplicate_hint=False,
+            )
+        )
+
+    # 文件内重复
+    for r in preview_rows:
+        if r.status == "skip" or not r.end_date:
+            continue
+        key = (r.contract_name.strip(), r.channel_name.strip(), r.end_date)
+        if triplet_counts.get(key, 0) > 1:
+            r.duplicate_hint = True
+            r.status = "warn"
+            if "疑似重复：本文件内存在相同合同名称+渠道+终止日" not in r.issues:
+                r.issues.append("疑似重复：本文件内存在相同合同名称+渠道+终止日")
+
+    # 库内重复
+    if preview_rows:
+        ready_triples = [
+            (r.contract_name.strip(), r.channel_name.strip(), r.end_date)
+            for r in preview_rows
+            if r.status != "skip" and r.end_date
+        ]
+        if ready_triples:
+            for r in preview_rows:
+                if r.status == "skip" or not r.end_date:
+                    continue
+                try:
+                    ed = dt.date.fromisoformat(r.end_date)
+                except ValueError:
+                    continue
+                exists = db.scalar(
+                    select(func.count())
+                    .select_from(ContractHeader)
+                    .where(
+                        ContractHeader.contract_name == r.contract_name.strip(),
+                        ContractHeader.channel_name == r.channel_name.strip(),
+                        ContractHeader.end_date == ed,
+                    )
+                )
+                if exists and exists > 0:
+                    r.duplicate_hint = True
+                    r.status = "warn"
+                    msg = "疑似重复：系统中已存在相同合同名称+渠道+终止日"
+                    if msg not in r.issues:
+                        r.issues.append(msg)
+
+    return ContractExcelPreviewOut(rows=preview_rows, file_label=filename or "")
+
+
+@app.post("/contracts/import-excel/preview", response_model=ContractExcelPreviewOut)
+async def contract_excel_preview(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech])),
+):
+    name = (file.filename or "").lower()
+    if not name.endswith((".xlsx", ".csv")):
+        raise HTTPException(status_code=400, detail="请上传 .xlsx 或 .csv")
+    raw = await file.read()
+    if len(raw) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="文件大小不能超过 20MB")
+    if not raw:
+        raise HTTPException(status_code=400, detail="空文件")
+    return _contract_excel_preview_from_file(file.filename or "upload", raw, db)
+
+
+@app.post("/contracts/import-excel/commit", response_model=ContractExcelCommitOut)
+def contract_excel_commit(
+    payload: ContractExcelCommitIn,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech])),
+):
+    created = 0
+    skipped = 0
+    created_ids: list[int] = []
+    skip_reasons: list[str] = []
+    for it in payload.items:
+        cn = (it.contract_no or "").strip()
+        cname = (it.contract_name or "").strip()
+        ch = (it.channel_name or "").strip()
+        if not cname or not ch:
+            skipped += 1
+            skip_reasons.append(f"{cn or '(无编号)'}: 名称或渠道为空")
+            continue
+        if not cn:
+            skipped += 1
+            skip_reasons.append(f"{cname}: 合同编号为空")
+            continue
+        try:
+            sd = dt.date.fromisoformat((it.start_date or "").strip())
+            ed = dt.date.fromisoformat((it.end_date or "").strip())
+        except ValueError:
+            skipped += 1
+            skip_reasons.append(f"{cn}: 日期格式无效")
+            continue
+        if ed < sd:
+            skipped += 1
+            skip_reasons.append(f"{cn}: 结束日期早于开始日期")
+            continue
+        if db.scalar(select(ContractHeader).where(ContractHeader.contract_no == cn)):
+            skipped += 1
+            skip_reasons.append(f"{cn}: 合同编号已存在")
+            continue
+        row = ContractHeader(
+            contract_no=cn,
+            contract_name=cname or cn,
+            channel_name=ch,
+            platform_party_name=(it.platform_party_name or "广州熊动科技有限公司").strip() or "广州熊动科技有限公司",
+            platform_party_address=(it.platform_party_address or "").strip(),
+            developer_party_name=(it.developer_party_name or "").strip(),
+            developer_party_address=(it.developer_party_address or "").strip(),
+            start_date=sd,
+            end_date=ed,
+            status=ContractStatus.draft,
+            remark=(it.remark or "").strip()[:1000],
+        )
+        db.add(row)
+        db.flush()
+        created_ids.append(row.id)
+        write_system_audit(
+            db,
+            ctx["user"],
+            "create_contract",
+            "contract_header",
+            str(row.id),
+            f"Excel导入草稿: {row.contract_no}",
+        )
+        created += 1
+    db.commit()
+    return ContractExcelCommitOut(created=created, skipped=skipped, created_ids=created_ids, skip_reasons=skip_reasons)
 
 
 @app.post("/games")
