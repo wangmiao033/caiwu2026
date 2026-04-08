@@ -178,6 +178,8 @@ class Game(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(150), unique=True, index=True)
     rd_company: Mapped[str] = mapped_column(String(150))
+    # 研发分成（百分比 0~100），作为游戏级固定值；渠道-游戏映射页将优先使用该值
+    rd_share_percent: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("0"))
     active: Mapped[bool] = mapped_column(default=True)
 
 
@@ -468,6 +470,7 @@ class GameBulkCreateIn(BaseModel):
 class GameIn(BaseModel):
     name: str
     rd_company: str
+    rd_share_percent: Decimal = Decimal("0")
 
 
 class ProjectIn(BaseModel):
@@ -924,6 +927,20 @@ def ensure_game_variant_settlement_columns():
             conn.execute(text(stmt))
 
 
+def ensure_game_share_percent_column():
+    inspector = inspect(engine)
+    if "games" not in inspector.get_table_names():
+        return
+    existing = {c["name"] for c in inspector.get_columns("games")}
+    if "rd_share_percent" in existing:
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE games ADD COLUMN rd_share_percent NUMERIC(6,2) DEFAULT 0"))
+    except Exception:
+        pass
+
+
 def ensure_import_enrichment_columns():
     inspector = inspect(engine)
     if "raw_statements" in inspector.get_table_names():
@@ -984,6 +1001,7 @@ def startup():
     Base.metadata.create_all(bind=engine)
     ensure_user_profiles_role_string()
     ensure_game_variant_settlement_columns()
+    ensure_game_share_percent_column()
     ensure_import_enrichment_columns()
     with SessionLocal() as db:
         create_default_data(db)
@@ -1149,7 +1167,9 @@ def delete_channel(channel_id: int, db: Session = Depends(get_db), _: dict = Dep
 
 @app.post("/games")
 def create_game(payload: GameIn, db: Session = Depends(get_db), ctx: dict = Depends(require_role([Role.admin, Role.biz, Role.ops]))):
-    game = Game(name=payload.name, rd_company=payload.rd_company)
+    if payload.rd_share_percent < 0 or payload.rd_share_percent > 100:
+        raise HTTPException(status_code=400, detail="研发分成需在 0~100 之间")
+    game = Game(name=payload.name, rd_company=payload.rd_company, rd_share_percent=payload.rd_share_percent)
     db.add(game)
     db.flush()
     write_system_audit(db, ctx["user"], "create_game", "game", str(game.id), f"新增游戏: {payload.name}")
@@ -1180,7 +1200,7 @@ def bulk_create_games(
         if name in exists:
             failed_names.append(name)
             continue
-        db.add(Game(name=name, rd_company="待补充"))
+        db.add(Game(name=name, rd_company="待补充", rd_share_percent=Decimal("0")))
         success_count += 1
     write_system_audit(
         db,
@@ -1204,8 +1224,11 @@ def update_game(game_id: int, payload: GameIn, db: Session = Depends(get_db), _:
     row = db.get(Game, game_id)
     if not row:
         raise HTTPException(status_code=404, detail="游戏不存在")
+    if payload.rd_share_percent < 0 or payload.rd_share_percent > 100:
+        raise HTTPException(status_code=400, detail="研发分成需在 0~100 之间")
     row.name = payload.name
     row.rd_company = payload.rd_company
+    row.rd_share_percent = payload.rd_share_percent
     write_system_audit(db, _["user"], "update_game", "game", str(row.id), f"编辑游戏: {payload.name}")
     db.commit()
     return {"id": row.id, "name": row.name}

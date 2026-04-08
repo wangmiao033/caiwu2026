@@ -7,7 +7,7 @@ import { buildExportFilename, exportRowsToCsv, exportRowsToXlsx } from "@/lib/ex
 import RoleGuard from "@/components/RoleGuard";
 
 type Channel = { id: number; name: string };
-type Game = { id: number; name: string };
+type Game = { id: number; name: string; rd_share_percent?: number };
 type Row = {
   id: number;
   channel: string;
@@ -190,6 +190,17 @@ export default function ChannelGameMapPage() {
   }, []);
   const channelSharePercent = Form.useWatch("revenue_share_ratio", form) as number | undefined;
   const rdSharePercent = Form.useWatch("rd_settlement_ratio", form) as number | undefined;
+  const gameId = Form.useWatch("game_id", form) as number | undefined;
+
+  useEffect(() => {
+    if (!gameId) return;
+    const g = games.find((x) => x.id === gameId);
+    if (!g || typeof g.rd_share_percent !== "number") return;
+    const current = Number(form.getFieldValue("rd_settlement_ratio"));
+    if (Number.isFinite(current) && Math.abs(current - g.rd_share_percent) < 0.0001) return;
+    form.setFieldValue("rd_settlement_ratio", g.rd_share_percent);
+  }, [gameId, games, form]);
+
   const publishSharePercent =
     typeof channelSharePercent === "number" && typeof rdSharePercent === "number"
       ? Number((100 - channelSharePercent - rdSharePercent).toFixed(2))
@@ -253,20 +264,44 @@ export default function ChannelGameMapPage() {
           { title: "渠道", dataIndex: "channel" },
           { title: "游戏", dataIndex: "game" },
           { title: "渠道分成", dataIndex: "revenue_share_ratio", render: (v: number) => `${toPercent(v)}%` },
-          { title: "研发分成", dataIndex: "rd_settlement_ratio", render: (v: number) => `${toPercent(v)}%` },
-          { title: "发行分成", render: (_, r) => `${toPercent(calcPublishRatio(r.revenue_share_ratio, r.rd_settlement_ratio))}%` },
+          {
+            title: "研发分成",
+            render: (_, r) => {
+              const g = games.find((x) => x.name === r.game);
+              const fromGame = g && typeof g.rd_share_percent === "number";
+              const rdRatio = fromGame ? toRatio(g.rd_share_percent as number) : r.rd_settlement_ratio;
+              return (
+                <Space size={6}>
+                  <span>{`${toPercent(rdRatio)}%`}</span>
+                  {fromGame ? <Tag color="blue">来自游戏</Tag> : null}
+                </Space>
+              );
+            },
+          },
+          {
+            title: "发行分成",
+            render: (_, r) => {
+              const g = games.find((x) => x.name === r.game);
+              const rdRatio = g && typeof g.rd_share_percent === "number" ? toRatio(g.rd_share_percent) : r.rd_settlement_ratio;
+              return `${toPercent(calcPublishRatio(r.revenue_share_ratio, rdRatio))}%`;
+            },
+          },
           {
             title: "合计",
             render: (_, r) => {
-              const publishRatio = calcPublishRatio(r.revenue_share_ratio, r.rd_settlement_ratio);
-              return `${toPercent(r.revenue_share_ratio + r.rd_settlement_ratio + publishRatio)}%`;
+              const g = games.find((x) => x.name === r.game);
+              const rdRatio = g && typeof g.rd_share_percent === "number" ? toRatio(g.rd_share_percent) : r.rd_settlement_ratio;
+              const publishRatio = calcPublishRatio(r.revenue_share_ratio, rdRatio);
+              return `${toPercent(r.revenue_share_ratio + rdRatio + publishRatio)}%`;
             },
           },
           {
             title: "校验状态",
             render: (_, r) => {
-              const publishRatio = calcPublishRatio(r.revenue_share_ratio, r.rd_settlement_ratio);
-              const ok = isTotalValid(r.revenue_share_ratio, r.rd_settlement_ratio, publishRatio);
+              const g = games.find((x) => x.name === r.game);
+              const rdRatio = g && typeof g.rd_share_percent === "number" ? toRatio(g.rd_share_percent) : r.rd_settlement_ratio;
+              const publishRatio = calcPublishRatio(r.revenue_share_ratio, rdRatio);
+              const ok = isTotalValid(r.revenue_share_ratio, rdRatio, publishRatio);
               return <Tag color={ok ? "green" : "red"}>{ok ? "正常" : "异常"}</Tag>;
             },
           },
@@ -285,7 +320,7 @@ export default function ChannelGameMapPage() {
                       channel_id: channel.id,
                       game_id: game.id,
                       revenue_share_ratio: toPercent(r.revenue_share_ratio),
-                      rd_settlement_ratio: toPercent(r.rd_settlement_ratio),
+                      rd_settlement_ratio: typeof game.rd_share_percent === "number" ? game.rd_share_percent : toPercent(r.rd_settlement_ratio),
                     });
                     setOpen(true);
                   }}
@@ -325,8 +360,13 @@ export default function ChannelGameMapPage() {
           <Form.Item name="revenue_share_ratio" label="渠道分成(%)" rules={[{ required: true }]}>
             <InputNumber min={0} max={100} step={0.01} style={{ width: "100%" }} />
           </Form.Item>
-          <Form.Item name="rd_settlement_ratio" label="研发分成(%)" rules={[{ required: true }]}>
-            <InputNumber min={0} max={100} step={0.01} style={{ width: "100%" }} />
+          <Form.Item
+            name="rd_settlement_ratio"
+            label="研发分成(%)（来自游戏固定值）"
+            rules={[{ required: true }]}
+            tooltip="研发分成来自游戏主数据，映射中不再单独维护"
+          >
+            <InputNumber min={0} max={100} step={0.01} style={{ width: "100%" }} disabled />
           </Form.Item>
           <Form.Item label="发行分成(%)">
             <InputNumber value={publishSharePercent} disabled style={{ width: "100%" }} />

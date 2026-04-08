@@ -1,11 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Button, Card, Form, Input, Modal, Space, Table, Tag, message } from "antd";
+import { Button, Card, Form, Input, InputNumber, Modal, Space, Table, Tag, message } from "antd";
 import { apiRequest } from "@/lib/api";
 import { buildExportFilename, exportRowsToXlsx } from "@/lib/export";
 
-type Row = { id: number; name: string; rd_company: string };
+type Row = { id: number; name: string; rd_company: string; rd_share_percent?: number };
 type BulkPreviewRow = { key: string; name: string; status: "可新增" | "已存在" | "重复输入" };
 
 export default function GamesPage() {
@@ -60,7 +60,7 @@ export default function GamesPage() {
   const filtered = useMemo(() => rows.filter((x) => `${x.name}${x.rd_company}`.includes(keyword)), [rows, keyword]);
   const exportCurrent = () => {
     exportRowsToXlsx(
-      filtered.map((x) => ({ 游戏ID: x.id, 游戏名称: x.name, 研发主体: x.rd_company })),
+      filtered.map((x) => ({ 游戏ID: x.id, 游戏名称: x.name, 研发主体: x.rd_company, 研发分成: x.rd_share_percent ?? 0 })),
       buildExportFilename("games", "xlsx")
     );
     message.success("导出成功");
@@ -138,6 +138,7 @@ export default function GamesPage() {
           { title: "ID", dataIndex: "id", width: 100 },
           { title: "游戏名称", dataIndex: "name" },
           { title: "研发主体", dataIndex: "rd_company" },
+          { title: "研发分成(%)", dataIndex: "rd_share_percent", width: 120, render: (v: number | undefined) => (typeof v === "number" ? v : 0) },
           {
             title: "操作",
             render: (_, r) => (
@@ -167,6 +168,14 @@ export default function GamesPage() {
           </Form.Item>
           <Form.Item label="研发主体" name="rd_company" rules={[{ required: true }]}>
             <Input />
+          </Form.Item>
+          <Form.Item
+            label="研发分成(%)"
+            name="rd_share_percent"
+            rules={[{ required: true, message: "请填写研发分成" }]}
+            initialValue={0}
+          >
+            <InputNumber min={0} max={100} step={0.01} style={{ width: "100%" }} />
           </Form.Item>
         </Form>
       </Modal>
