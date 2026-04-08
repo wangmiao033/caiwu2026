@@ -233,29 +233,32 @@ export default function ExceptionsPage() {
     setSelectedRowKeys([]);
   }, [range, statusFilter, typeFilter, sourceFilter]);
 
-  const goQuick = (row: UnifiedExceptionRow) => {
+  const appendExceptionListContext = (qs: URLSearchParams) => {
+    qs.set("ex_type", String(typeFilter));
+    qs.set("ex_status", String(statusFilterToQuery(statusFilter)));
+    qs.set("ex_range", rangeToQuery(range));
+  };
+
+  const buildQuickNavigationUrl = (row: UnifiedExceptionRow): string => {
     if (row.type === "unmatched_channel" || row.type === "channel") {
       const ch = String(row.raw.raw_channel_name || "");
-      router.push(`/channels${ch ? `?keyword=${encodeURIComponent(ch)}` : ""}`);
-      return;
+      return `/channels${ch ? `?keyword=${encodeURIComponent(ch)}` : ""}`;
     }
     if (row.type === "unmatched_game" || row.type === "game") {
       const gm = String(row.raw.raw_game_name || "");
-      router.push(`/games${gm ? `?keyword=${encodeURIComponent(gm)}` : ""}`);
-      return;
+      return `/games${gm ? `?keyword=${encodeURIComponent(gm)}` : ""}`;
     }
     if (row.type === "unmapped_pair") {
       const { channel, game } = parsePairFromDetail(row.detail);
       const qs = new URLSearchParams();
       if (channel) qs.set("channel", channel);
       if (game) qs.set("game", game);
-      router.push(`/channel-game-map${qs.toString() ? `?${qs.toString()}` : ""}`);
-      return;
+      appendExceptionListContext(qs);
+      return `/channel-game-map?${qs.toString()}`;
     }
     if (row.type === "variant_unmatched") {
       const gm = row.detail.split(":").slice(1).join(":").trim();
-      router.push(`/game-variants${gm ? `?keyword=${encodeURIComponent(gm)}` : ""}`);
-      return;
+      return `/game-variants${gm ? `?keyword=${encodeURIComponent(gm)}` : ""}`;
     }
     if (row.type === "share") {
       const ch = String(row.raw.channel_name || "").trim();
@@ -263,14 +266,21 @@ export default function ExceptionsPage() {
       const qs = new URLSearchParams();
       if (ch) qs.set("channel", ch);
       if (gm) qs.set("game", gm);
-      router.push(`/billing-rules${qs.toString() ? `?${qs.toString()}` : ""}`);
-      return;
+      appendExceptionListContext(qs);
+      return `/billing-rules?${qs.toString()}`;
     }
     if (row.type === "overdue") {
-      router.push("/billing");
-      return;
+      return "/billing";
     }
-    router.push("/import?tab=history");
+    return "/import?tab=history";
+  };
+
+  const goQuick = (row: UnifiedExceptionRow) => {
+    router.push(buildQuickNavigationUrl(row));
+  };
+
+  const goQuickNewTab = (row: UnifiedExceptionRow) => {
+    window.open(buildQuickNavigationUrl(row), "_blank", "noopener,noreferrer");
   };
 
   const gotoBatch = (row: UnifiedExceptionRow) => {
@@ -525,6 +535,9 @@ export default function ExceptionsPage() {
                   <Button type="link" onClick={() => goQuick(row)}>
                     快捷处理
                   </Button>
+                  <Button type="link" onClick={() => goQuickNewTab(row)}>
+                    新标签
+                  </Button>
                   <Button type="link" onClick={() => gotoBatch(row)}>
                     查看所属批次
                   </Button>
@@ -580,6 +593,29 @@ export default function ExceptionsPage() {
                 <Typography.Text type="secondary">
                   建议处理：在「规则配置」中按上述渠道、游戏筛选后编辑对应行，或到「渠道-游戏映射」核对 revenue_share_ratio / rd_settlement_ratio。亦可点击「快捷处理」自动跳转并筛选。
                 </Typography.Text>
+                <Space wrap>
+                  {(() => {
+                    const ch = String(detail.raw.channel_name || "").trim();
+                    const gm = String(detail.raw.game_name || "").trim();
+                    const qs = new URLSearchParams();
+                    if (ch) qs.set("channel", ch);
+                    if (gm) qs.set("game", gm);
+                    qs.set("ex_type", String(typeFilter));
+                    qs.set("ex_status", String(statusFilterToQuery(statusFilter)));
+                    qs.set("ex_range", rangeToQuery(range));
+                    const q = qs.toString();
+                    return (
+                      <>
+                        <Button type="link" href={`/billing-rules?${q}`} target="_blank" rel="noopener noreferrer">
+                          规则配置（新标签）
+                        </Button>
+                        <Button type="link" href={`/channel-game-map?${q}`} target="_blank" rel="noopener noreferrer">
+                          渠道-游戏映射（新标签）
+                        </Button>
+                      </>
+                    );
+                  })()}
+                </Space>
               </>
             ) : (
               <Typography.Text type="secondary">明细：{detail.detail}</Typography.Text>

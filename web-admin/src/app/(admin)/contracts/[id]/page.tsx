@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { Alert, Button, Card, Descriptions, Space, Table, Tag, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import dayjs from "dayjs";
@@ -78,7 +78,10 @@ function mapServerItemsToLocal(rows: ContractItemRow[], fallbackChannel: string)
 export default function ContractDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const id = Number(params.id);
+  const preservedListQuery = searchParams.toString();
+  const editQuerySuffix = preservedListQuery ? `?${preservedListQuery}` : "";
   const [detail, setDetail] = useState<ContractDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [items, setItems] = useState<LocalContractItem[]>([]);
@@ -218,8 +221,16 @@ export default function ContractDetailPage() {
             </Button>
             {detail && canMutate ? (
               <>
-                <Button icon={<EditOutlined />} onClick={() => router.push(`/contracts/${detail.id}/edit`)}>
+                <Button icon={<EditOutlined />} onClick={() => router.push(`/contracts/${detail.id}/edit${editQuerySuffix}`)}>
                   编辑合同主档
+                </Button>
+                <Button
+                  type="link"
+                  href={`/contracts/${detail.id}/edit${editQuerySuffix}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  新标签打开编辑
                 </Button>
                 <Button type="primary" icon={<SaveOutlined />} loading={savingItems} onClick={() => void saveItemsOnly()}>
                   保存明细

@@ -63,6 +63,15 @@ export default function ContractsListPage() {
     void load();
   }, [load]);
 
+  const contractListContextSuffix = useMemo(() => {
+    const qs = new URLSearchParams();
+    const ch = channelQ.trim();
+    if (ch) qs.set("list_channel", ch);
+    if (statusQ) qs.set("list_status", statusQ);
+    const s = qs.toString();
+    return s ? `?${s}` : "";
+  }, [channelQ, statusQ]);
+
   const doLifecycle = useCallback(
     async (cid: number, action: string) => {
       try {
@@ -118,16 +127,30 @@ export default function ContractsListPage() {
       },
       {
         title: "操作",
-        width: 320,
+        width: 420,
         render: (_, r) => (
           <Space wrap size={0}>
-            <Button type="link" size="small" onClick={() => router.push(`/contracts/${r.id}`)}>
+            <Button type="link" size="small" onClick={() => router.push(`/contracts/${r.id}${contractListContextSuffix}`)}>
               查看
             </Button>
+            <Button type="link" size="small" href={`/contracts/${r.id}${contractListContextSuffix}`} target="_blank" rel="noopener noreferrer">
+              查看（新标签）
+            </Button>
             {canMutate ? (
-              <Button type="link" size="small" onClick={() => router.push(`/contracts/${r.id}/edit`)}>
-                编辑
-              </Button>
+              <>
+                <Button type="link" size="small" onClick={() => router.push(`/contracts/${r.id}/edit${contractListContextSuffix}`)}>
+                  编辑
+                </Button>
+                <Button
+                  type="link"
+                  size="small"
+                  href={`/contracts/${r.id}/edit${contractListContextSuffix}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  编辑（新标签）
+                </Button>
+              </>
             ) : null}
             {canMutate && r.stored_status === "draft" ? (
               <Button type="link" size="small" onClick={() => void doLifecycle(r.id, "activate")}>
@@ -153,7 +176,7 @@ export default function ContractsListPage() {
         ),
       },
     ],
-    [canMutate, router, doLifecycle]
+    [canMutate, router, doLifecycle, contractListContextSuffix]
   );
 
   return (

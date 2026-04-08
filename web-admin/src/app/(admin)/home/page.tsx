@@ -203,11 +203,16 @@ export default function HomePage() {
                 { title: "说明", dataIndex: "detail" },
                 {
                   title: "操作",
-                  width: 100,
+                  width: 160,
                   render: (_, row) => (
-                    <Button type="link" onClick={() => router.push(row.to)}>
-                      去处理
-                    </Button>
+                    <Space size={0} wrap>
+                      <Button type="link" onClick={() => router.push(row.to)}>
+                        去处理
+                      </Button>
+                      <Button type="link" href={row.to} target="_blank" rel="noopener noreferrer">
+                        新标签
+                      </Button>
+                    </Space>
                   ),
                 },
               ]}
@@ -218,9 +223,16 @@ export default function HomePage() {
           <Card title="快捷入口">
             <Space wrap>
               {quickActions.map((item) => (
-                <Button key={item.key} type="default" onClick={() => router.push(item.to)}>
-                  {item.text}
-                </Button>
+                <Space key={item.key} size={4} wrap>
+                  <Button type="default" onClick={() => router.push(item.to)}>
+                    {item.text}
+                  </Button>
+                  {item.key === "rules" || item.key === "mapping" ? (
+                    <Button type="link" href={item.to} target="_blank" rel="noopener noreferrer">
+                      新标签
+                    </Button>
+                  ) : null}
+                </Space>
               ))}
             </Space>
           </Card>
