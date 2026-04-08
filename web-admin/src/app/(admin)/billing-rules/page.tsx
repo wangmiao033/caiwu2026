@@ -1,74 +1,36 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
-import { Alert, Button, Card, Form, Input, InputNumber, Modal, Select, Space, Statistic, Switch, Table, Tag, Upload, message } from "antd";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Alert, Button, Card, Input, Modal, Select, Space, Statistic, Switch, Table, Tag, Upload, message } from "antd";
 import { apiRequest } from "@/lib/api";
 import { buildExportFilename, exportRowsToXlsx } from "@/lib/export";
 import * as XLSX from "xlsx";
 import RoleGuard from "@/components/RoleGuard";
-
-type SimpleItem = { id: number; name: string };
-type GameItem = { id: number; name: string; rd_share_percent?: number };
-type MapRow = { id: number; channel: string; game: string; revenue_share_ratio: number; rd_settlement_ratio: number };
-type RuleRow = {
-  key: string;
-  row_no?: number;
-  channel: string;
-  game: string;
-  discountType: "无" | "0.1折" | "0.05折";
-  channelFee: number;
-  taxRate: number;
-  rdShare: number;
-  privateRate: number;
-  ipLicense: number;
-  chaofanChannel: number;
-  chaofanRd: number;
-  enabled: boolean;
-  remark?: string;
-  error_message?: string;
-  error_fields?: string[];
-};
-
-const ratioToPercent = (ratio: number) => ratio * 100;
-const percentToRatio = (percent: number) => percent / 100;
-const formatRatioAsPercent = (ratio: number) => `${Number((ratioToPercent(ratio)).toFixed(4)).toString()}%`;
-
-const defaultRule = (): Omit<RuleRow, "key" | "channel" | "game"> => ({
-  discountType: "无",
-  channelFee: 0,
-  taxRate: 0,
-  rdShare: 0.5,
-  privateRate: 0,
-  ipLicense: 0,
-  chaofanChannel: 0,
-  chaofanRd: 0,
-  enabled: true,
-  remark: "",
-});
+import {
+  defaultRule,
+  formatRatioAsPercent,
+  getRulesFromStorageOrMaps,
+  percentToRatio,
+  rdRatioForGameName,
+  type GameItem,
+  type MapRow,
+  type RuleRow,
+  saveRulesToStorage,
+  type SimpleItem,
+} from "./billing-rules-shared";
 
 export default function BillingRulesPage() {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const [channels, setChannels] = useState<SimpleItem[]>([]);
   const [games, setGames] = useState<GameItem[]>([]);
-  const [maps, setMaps] = useState<MapRow[]>([]);
   const [rules, setRules] = useState<RuleRow[]>([]);
   const [qChannel, setQChannel] = useState<string>("");
   const [qGame, setQGame] = useState<string>("");
-  const [open, setOpen] = useState(false);
-  const [editingKey, setEditingKey] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [importRows, setImportRows] = useState<RuleRow[]>([]);
   const [onlyErrors, setOnlyErrors] = useState(false);
-  const [form] = Form.useForm();
-  const watchedGame = Form.useWatch("game", form);
-
-  const rdPercentForGameName = (gameName: string) => {
-    const g = games.find((x) => x.name === gameName);
-    return Number(g?.rd_share_percent ?? 0);
-  };
-
-  const rdRatioForGameName = (gameName: string) => percentToRatio(rdPercentForGameName(gameName));
 
   useEffect(() => {
     const ch = searchParams.get("channel");
@@ -89,33 +51,13 @@ export default function BillingRulesPage() {
         if (cancelled) return;
         setChannels(chRes);
         setGames(gmRes);
-        setMaps(mapRes);
-        const gameByName = new Map(gmRes.map((g) => [g.name, g]));
-        const rdFromMaster = (gameName: string) => {
-          const g = gameByName.get(gameName);
-          return percentToRatio(Number(g?.rd_share_percent ?? 0));
-        };
-        const cache = localStorage.getItem("billing_rules_local");
-        if (cache) {
-          setRules(JSON.parse(cache));
-        } else {
-          setRules(
-            mapRes.map((x) => ({
-              key: `${x.channel}-${x.game}`,
-              channel: x.channel,
-              game: x.game,
-              ...defaultRule(),
-              rdShare: rdFromMaster(x.game),
-            }))
-          );
-        }
+        setRules(getRulesFromStorageOrMaps(mapRes, gmRes));
       } catch {
         if (!cancelled) {
           apiRequest<SimpleItem[]>("/channels").then(setChannels).catch(() => {});
           apiRequest<GameItem[]>("/games").then(setGames).catch(() => {});
           apiRequest<MapRow[]>("/channel-game-map")
             .then((data) => {
-              setMaps(data);
               const cache = localStorage.getItem("billing_rules_local");
               if (cache) {
                 setRules(JSON.parse(cache));
@@ -140,15 +82,9 @@ export default function BillingRulesPage() {
     };
   }, []);
 
-  useEffect(() => {
-    if (!open) return;
-    if (!watchedGame) return;
-    form.setFieldValue("rdShare", rdPercentForGameName(watchedGame));
-  }, [open, watchedGame, games, form]);
-
   const saveLocal = (next: RuleRow[]) => {
     setRules(next);
-    localStorage.setItem("billing_rules_local", JSON.stringify(next));
+    saveRulesToStorage(next);
   };
 
   const filtered = useMemo(
@@ -156,55 +92,11 @@ export default function BillingRulesPage() {
     [rules, qChannel, qGame]
   );
 
-  const onAdd = () => {
-    setEditingKey(null);
-    form.resetFields();
-    setOpen(true);
-  };
-
-  const onEdit = (row: RuleRow) => {
-    setEditingKey(row.key);
-    const rdPct = rdPercentForGameName(row.game) || ratioToPercent(row.rdShare);
-    form.setFieldsValue({
-      ...row,
-      channelFee: ratioToPercent(row.channelFee),
-      taxRate: ratioToPercent(row.taxRate),
-      rdShare: rdPct,
-      privateRate: ratioToPercent(row.privateRate),
-    });
-    setOpen(true);
-  };
-
-  const onSubmit = async () => {
-    const values = await form.validateFields();
-    const channel = values.channel as string;
-    const game = values.game as string;
-    const key = `${channel}-${game}`;
-    const rdShareRatio = rdRatioForGameName(game);
-    const item: RuleRow = {
-      key,
-      channel,
-      game,
-      ...values,
-      channelFee: percentToRatio(Number(values.channelFee || 0)),
-      taxRate: percentToRatio(Number(values.taxRate || 0)),
-      rdShare: rdShareRatio,
-      privateRate: percentToRatio(Number(values.privateRate || 0)),
-    };
-    const next = editingKey ? rules.map((x) => (x.key === editingKey ? item : x)) : [item, ...rules.filter((x) => x.key !== key)];
-    saveLocal(next);
-
-    try {
-      await apiRequest("/billing/rules", "POST", {
-        name: `${channel}-${game}-rule`,
-        bill_type: "channel",
-        default_ratio: rdShareRatio,
-      });
-      message.success("规则已保存（并同步基础比例到后端）");
-    } catch (e) {
-      message.warning(`本地已保存，后端同步失败：${(e as Error).message}`);
-    }
-    setOpen(false);
+  const goNew = () => {
+    const sp = new URLSearchParams();
+    if (qChannel) sp.set("channel", qChannel);
+    if (qGame) sp.set("game", qGame);
+    router.push(sp.toString() ? `/billing-rules/new?${sp.toString()}` : "/billing-rules/new");
   };
 
   const downloadTemplate = () => {
@@ -247,7 +139,7 @@ export default function BillingRulesPage() {
       const pRatePercent = Number(r["私点"] || 0);
       const cFee = percentToRatio(cFeePercent);
       const tRate = percentToRatio(tRatePercent);
-      const rdRatio = rdRatioForGameName(game);
+      const rdRatio = rdRatioForGameName(games, game);
       const pRate = percentToRatio(pRatePercent);
       if (Number.isNaN(cFeePercent)) errs.push("通道费格式非法");
       if (Number.isNaN(tRatePercent)) errs.push("税点格式非法");
@@ -311,9 +203,9 @@ export default function BillingRulesPage() {
   const importErrCount = importRows.filter((x) => !!x.error_message).length;
   const importOkCount = importRows.length - importErrCount;
   const previewRows = onlyErrors ? importRows.filter((x) => !!x.error_message) : importRows;
-  const fieldErr = (row: RuleRow, key: string) => !!row.error_fields?.includes(key);
-  const markCell = (value: unknown, row: RuleRow, key: string) => (
-    <span style={{ background: fieldErr(row, key) ? "#fff1f0" : undefined, padding: "2px 6px", borderRadius: 4 }}>{String(value ?? "")}</span>
+  const fieldErr = (row: RuleRow, ky: string) => !!row.error_fields?.includes(ky);
+  const markCell = (value: unknown, row: RuleRow, ky: string) => (
+    <span style={{ background: fieldErr(row, ky) ? "#fff1f0" : undefined, padding: "2px 6px", borderRadius: 4 }}>{String(value ?? "")}</span>
   );
   const exportErrors = () => {
     const errs = importRows.filter((x) => !!x.error_message);
@@ -375,171 +267,138 @@ export default function BillingRulesPage() {
   return (
     <RoleGuard allow={["admin", "finance_manager"]}>
       <Card
-      title="规则配置（游戏 + 渠道）"
-      extra={
-        <Space>
-          <Select
-            allowClear
-            placeholder="筛选渠道"
-            style={{ width: 160 }}
-            options={channels.map((x) => ({ label: x.name, value: x.name }))}
-            value={qChannel || undefined}
-            onChange={(v) => setQChannel(v || "")}
-          />
-          <Select
-            allowClear
-            placeholder="筛选游戏"
-            style={{ width: 160 }}
-            options={games.map((x) => ({ label: x.name, value: x.name }))}
-            value={qGame || undefined}
-            onChange={(v) => setQGame(v || "")}
-          />
-          <Button type="primary" onClick={onAdd}>
-            新增规则
-          </Button>
-          <Button onClick={downloadTemplate}>模板下载</Button>
-          <Upload beforeUpload={(file) => { parseImport(file); return false; }} showUploadList={false}>
-            <Button>导入规则</Button>
-          </Upload>
-          <Button onClick={exportCurrent}>导出当前筛选</Button>
-          <Button onClick={exportAll}>导出全部</Button>
-        </Space>
-      }
-    >
-      {fromExceptionJump ? (
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 16 }}
-          message={
-            fromImportPrecheckPair
-              ? "导入预检：研发分成来自游戏主数据，请勿在本页修改研发分成"
-              : "处理分成异常时请先核对主数据与映射"
-          }
-          description={
-            fromImportPrecheckPair
-              ? "请在下方表格中定位该渠道与游戏，补齐通道费、税点、私点等计费字段并保存。研发分成请前往「游戏管理」维护。"
-              : "研发分成以「游戏管理」中的研发分成(%)为准；渠道侧分成请在「渠道-游戏映射」中维护。本页规则中的研发分成仅展示游戏主数据，不可在此修改。"
-          }
-        />
-      ) : null}
-      <Table
-        rowKey="key"
-        dataSource={filtered}
-        pagination={{ pageSize: 10 }}
-        columns={[
-          { title: "渠道", dataIndex: "channel" },
-          { title: "游戏", dataIndex: "game" },
-          { title: "折扣", dataIndex: "discountType" },
-          { title: "通道费", dataIndex: "channelFee", render: (v: number) => formatRatioAsPercent(v) },
-          { title: "税点", dataIndex: "taxRate", render: (v: number) => formatRatioAsPercent(v) },
-          {
-            title: "研发分成",
-            dataIndex: "rdShare",
-            render: (_: number, r: RuleRow) => formatRatioAsPercent(rdRatioForGameName(r.game)),
-          },
-          { title: "私点", dataIndex: "privateRate", render: (v: number) => formatRatioAsPercent(v) },
-          {
-            title: "状态",
-            dataIndex: "enabled",
-            render: (v: boolean) => <Tag color={v ? "green" : "default"}>{v ? "启用" : "停用"}</Tag>,
-          },
-          { title: "操作", render: (_, r) => <Button type="link" onClick={() => onEdit(r)}>编辑</Button> },
-        ]}
-      />
-
-      <Modal open={open} title={editingKey ? "编辑规则" : "新增规则"} onCancel={() => setOpen(false)} onOk={onSubmit}>
-        <Form
-          form={form}
-          layout="vertical"
-          initialValues={{
-            ...defaultRule(),
-            channel: maps[0]?.channel,
-            game: maps[0]?.game,
-            channelFee: ratioToPercent(defaultRule().channelFee),
-            taxRate: ratioToPercent(defaultRule().taxRate),
-            rdShare: ratioToPercent(defaultRule().rdShare),
-            privateRate: ratioToPercent(defaultRule().privateRate),
-          }}
-        >
-          <Form.Item label="渠道" name="channel" rules={[{ required: true }]}>
-            <Select options={channels.map((x) => ({ label: x.name, value: x.name }))} />
-          </Form.Item>
-          <Form.Item label="游戏" name="game" rules={[{ required: true }]}>
-            <Select options={games.map((x) => ({ label: x.name, value: x.name }))} />
-          </Form.Item>
-          <Form.Item label="折扣类型" name="discountType">
-            <Select options={[{ label: "无", value: "无" }, { label: "0.1折", value: "0.1折" }, { label: "0.05折", value: "0.05折" }]} />
-          </Form.Item>
-          <Form.Item label="通道费(%)" name="channelFee"><InputNumber min={0} max={100} step={0.01} style={{ width: "100%" }} /></Form.Item>
-          <Form.Item label="税点(%)" name="taxRate"><InputNumber min={0} max={100} step={0.01} style={{ width: "100%" }} /></Form.Item>
-          <Form.Item
-            label="研发分成(%)"
-            name="rdShare"
-            tooltip="来自游戏主数据，不能在此修改"
-          >
-            <InputNumber min={0} max={100} step={0.01} style={{ width: "100%" }} disabled readOnly />
-          </Form.Item>
-          <Form.Item label="私点(%)" name="privateRate"><InputNumber min={0} max={100} step={0.01} style={{ width: "100%" }} /></Form.Item>
-          <Form.Item label="IP授权（预留）" name="ipLicense"><InputNumber min={0} step={0.01} style={{ width: "100%" }} /></Form.Item>
-          <Form.Item label="超凡与渠道（预留）" name="chaofanChannel"><InputNumber min={0} step={0.01} style={{ width: "100%" }} /></Form.Item>
-          <Form.Item label="超凡与研发（预留）" name="chaofanRd"><InputNumber min={0} step={0.01} style={{ width: "100%" }} /></Form.Item>
-          <Form.Item label="启用状态" name="enabled" valuePropName="checked"><Switch /></Form.Item>
-          <Form.Item label="备注" name="remark"><Input /></Form.Item>
-        </Form>
-      </Modal>
-      <Modal
-        open={importOpen}
-        width={980}
-        title="规则导入预览"
-        onCancel={() => setImportOpen(false)}
-        onOk={confirmImport}
-        okText="确认导入"
+        title="规则配置（游戏 + 渠道）"
+        extra={
+          <Space>
+            <Select
+              allowClear
+              placeholder="筛选渠道"
+              style={{ width: 160 }}
+              options={channels.map((x) => ({ label: x.name, value: x.name }))}
+              value={qChannel || undefined}
+              onChange={(v) => setQChannel(v || "")}
+            />
+            <Select
+              allowClear
+              placeholder="筛选游戏"
+              style={{ width: 160 }}
+              options={games.map((x) => ({ label: x.name, value: x.name }))}
+              value={qGame || undefined}
+              onChange={(v) => setQGame(v || "")}
+            />
+            <Button type="primary" onClick={goNew}>
+              新增规则
+            </Button>
+            <Button onClick={downloadTemplate}>模板下载</Button>
+            <Upload beforeUpload={(file) => { parseImport(file); return false; }} showUploadList={false}>
+              <Button>导入规则</Button>
+            </Upload>
+            <Button onClick={exportCurrent}>导出当前筛选</Button>
+            <Button onClick={exportAll}>导出全部</Button>
+          </Space>
+        }
       >
-        <Space size={24} style={{ marginBottom: 12 }}>
-          <Statistic title="总行数" value={importRows.length} />
-          <Statistic title="正常行数" value={importOkCount} />
-          <Statistic title="异常行数" value={importErrCount} valueStyle={{ color: importErrCount ? "#cf1322" : undefined }} />
-        </Space>
-        <Space style={{ marginBottom: 8 }}>
-          <Button size="small" type={!onlyErrors ? "primary" : "default"} onClick={() => setOnlyErrors(false)}>
-            预览全部
-          </Button>
-          <Button size="small" type={onlyErrors ? "primary" : "default"} onClick={() => setOnlyErrors(true)}>
-            仅查看异常行
-          </Button>
-          <Button size="small" onClick={exportErrors}>
-            导出异常
-          </Button>
-        </Space>
+        {fromExceptionJump ? (
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message={
+              fromImportPrecheckPair
+                ? "导入预检：研发分成来自游戏主数据，请勿在本页修改研发分成"
+                : "处理分成异常时请先核对主数据与映射"
+            }
+            description={
+              fromImportPrecheckPair
+                ? "请在下方表格中定位该渠道与游戏，补齐通道费、税点、私点等计费字段并保存。研发分成请前往「游戏管理」维护。"
+                : "研发分成以「游戏管理」中的研发分成(%)为准；渠道侧分成请在「渠道-游戏映射」中维护。本页规则中的研发分成仅展示游戏主数据，不可在此修改。"
+            }
+          />
+        ) : null}
         <Table
           rowKey="key"
-          dataSource={previewRows}
-          pagination={{ pageSize: 8 }}
-          rowClassName={(r) => (r.error_message ? "row-error" : "")}
+          dataSource={filtered}
+          pagination={{ pageSize: 10 }}
           columns={[
-            { title: "Excel行号", dataIndex: "row_no", width: 100 },
-            { title: "渠道", dataIndex: "channel", render: (v, r) => markCell(v, r, "channel") },
-            { title: "游戏", dataIndex: "game", render: (v, r) => markCell(v, r, "game") },
-            { title: "折扣类型", dataIndex: "discountType", render: (v, r) => markCell(v, r, "discount_type") },
-            { title: "通道费", dataIndex: "channelFee", render: (v, r) => markCell(formatRatioAsPercent(Number(v || 0)), r, "channel_fee") },
-            { title: "税点", dataIndex: "taxRate", render: (v, r) => markCell(formatRatioAsPercent(Number(v || 0)), r, "tax_rate") },
-            { title: "研发分成", dataIndex: "rdShare", render: (v, r) => markCell(formatRatioAsPercent(Number(v || 0)), r, "rd_share") },
-            { title: "私点", dataIndex: "privateRate", render: (v, r) => markCell(formatRatioAsPercent(Number(v || 0)), r, "private_rate") },
-            { title: "状态", dataIndex: "enabled", render: (v, r) => markCell(v ? "启用" : "停用", r, "status") },
+            { title: "渠道", dataIndex: "channel" },
+            { title: "游戏", dataIndex: "game" },
+            { title: "折扣", dataIndex: "discountType" },
+            { title: "通道费", dataIndex: "channelFee", render: (v: number) => formatRatioAsPercent(v) },
+            { title: "税点", dataIndex: "taxRate", render: (v: number) => formatRatioAsPercent(v) },
             {
-              title: "异常原因",
-              dataIndex: "error_message",
-              render: (v: string) => v || "-",
+              title: "研发分成",
+              dataIndex: "rdShare",
+              render: (_: number, r: RuleRow) => formatRatioAsPercent(rdRatioForGameName(games, r.game)),
+            },
+            { title: "私点", dataIndex: "privateRate", render: (v: number) => formatRatioAsPercent(v) },
+            {
+              title: "状态",
+              dataIndex: "enabled",
+              render: (v: boolean) => <Tag color={v ? "green" : "default"}>{v ? "启用" : "停用"}</Tag>,
+            },
+            {
+              title: "操作",
+              render: (_, r) => (
+                <Button type="link" onClick={() => router.push(`/billing-rules/${encodeURIComponent(r.key)}/edit`)}>
+                  编辑
+                </Button>
+              ),
             },
           ]}
         />
-      </Modal>
-      <style jsx global>{`
-        .row-error td {
-          background: #fff1f0 !important;
-        }
-      `}</style>
+
+        <Modal
+          open={importOpen}
+          width={980}
+          title="规则导入预览"
+          onCancel={() => setImportOpen(false)}
+          onOk={confirmImport}
+          okText="确认导入"
+        >
+          <Space size={24} style={{ marginBottom: 12 }}>
+            <Statistic title="总行数" value={importRows.length} />
+            <Statistic title="正常行数" value={importOkCount} />
+            <Statistic title="异常行数" value={importErrCount} valueStyle={{ color: importErrCount ? "#cf1322" : undefined }} />
+          </Space>
+          <Space style={{ marginBottom: 8 }}>
+            <Button size="small" type={!onlyErrors ? "primary" : "default"} onClick={() => setOnlyErrors(false)}>
+              预览全部
+            </Button>
+            <Button size="small" type={onlyErrors ? "primary" : "default"} onClick={() => setOnlyErrors(true)}>
+              仅查看异常行
+            </Button>
+            <Button size="small" onClick={exportErrors}>
+              导出异常
+            </Button>
+          </Space>
+          <Table
+            rowKey="key"
+            dataSource={previewRows}
+            pagination={{ pageSize: 8 }}
+            rowClassName={(r) => (r.error_message ? "row-error" : "")}
+            columns={[
+              { title: "Excel行号", dataIndex: "row_no", width: 100 },
+              { title: "渠道", dataIndex: "channel", render: (v, r) => markCell(v, r, "channel") },
+              { title: "游戏", dataIndex: "game", render: (v, r) => markCell(v, r, "game") },
+              { title: "折扣类型", dataIndex: "discountType", render: (v, r) => markCell(v, r, "discount_type") },
+              { title: "通道费", dataIndex: "channelFee", render: (v, r) => markCell(formatRatioAsPercent(Number(v || 0)), r, "channel_fee") },
+              { title: "税点", dataIndex: "taxRate", render: (v, r) => markCell(formatRatioAsPercent(Number(v || 0)), r, "tax_rate") },
+              { title: "研发分成", dataIndex: "rdShare", render: (v, r) => markCell(formatRatioAsPercent(Number(v || 0)), r, "rd_share") },
+              { title: "私点", dataIndex: "privateRate", render: (v, r) => markCell(formatRatioAsPercent(Number(v || 0)), r, "private_rate") },
+              { title: "状态", dataIndex: "enabled", render: (v, r) => markCell(v ? "启用" : "停用", r, "status") },
+              {
+                title: "异常原因",
+                dataIndex: "error_message",
+                render: (v: string) => v || "-",
+              },
+            ]}
+          />
+        </Modal>
+        <style jsx global>{`
+          .row-error td {
+            background: #fff1f0 !important;
+          }
+        `}</style>
       </Card>
     </RoleGuard>
   );
