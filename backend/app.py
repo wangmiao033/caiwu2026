@@ -3600,8 +3600,10 @@ def generate_bills(
 ):
     # 兼容历史参数：旧前端可能仍传 force_new_version，语义上等同于重生成
     overwrite = bool(overwrite or force_new_version)
-    existing_period_bills = db.scalars(select(Bill).where(Bill.period == period)).all()
-    if existing_period_bills and not overwrite:
+    period_bills = db.scalars(select(Bill).where(Bill.period == period)).all()
+    active_period_bills = [b for b in period_bills if (b.lifecycle_status or "active") == "active"]
+    # 与列表默认口径一致：仅当仍有「未作废」账单时禁止重复生成；全部为 discarded 时可重新生成
+    if active_period_bills and not overwrite:
         raise HTTPException(status_code=400, detail="该账期账单已存在")
     recon_tasks = db.scalars(select(ReconTask).where(ReconTask.period == period, ReconTask.status == ReconStatus.confirmed)).all()
     if not recon_tasks:
@@ -3623,7 +3625,7 @@ def generate_bills(
         channel_sum[r.channel_name] = channel_sum.get(r.channel_name, Decimal("0")) + channel_amount
         rd_sum[link.game.rd_company] = rd_sum.get(link.game.rd_company, Decimal("0")) + rd_amount
     existing_key_map: dict[tuple[BillType, str], Bill] = {}
-    for bill in existing_period_bills:
+    for bill in active_period_bills:
         key = (bill.bill_type, bill.target_name)
         prev = existing_key_map.get(key)
         if not prev or bill.id > prev.id:
