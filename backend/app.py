@@ -3660,6 +3660,100 @@ def _bill_channel_target_name(raw_statement_channel: str, canonical_channel_name
     return raw
 
 
+def _compute_billing_split_from_raw(db: Session, task_ids: list[int]) -> dict:
+    """与账单生成相同的 raw→渠道/研发拆分；保留金额=总流水−渠道拆分−研发拆分（含未映射与分成剩余）。"""
+    rows = db.scalars(select(RawStatement).where(RawStatement.recon_task_id.in_(task_ids))).all()
+    map_rows = db.scalars(select(ChannelGameMap)).all()
+    map_key = {(m.channel.name, m.game.name): m for m in map_rows}
+    total_gross = Decimal("0")
+    channel_sum: dict[str, Decimal] = {}
+    rd_sum: dict[str, Decimal] = {}
+    unmapped_gross = Decimal("0")
+    unmapped_rows = 0
+    for r in rows:
+        g = Decimal(str(r.gross_amount or 0))
+        total_gross += g
+        link = map_key.get((r.channel_name, r.game_name))
+        if not link:
+            unmapped_gross += g
+            unmapped_rows += 1
+            continue
+        channel_amount = g * link.revenue_share_ratio
+        rd_amount = g * link.rd_settlement_ratio
+        bill_ch = _bill_channel_target_name(r.channel_name, link.channel.name)
+        channel_sum[bill_ch] = channel_sum.get(bill_ch, Decimal("0")) + channel_amount
+        rd_sum[link.game.rd_company] = rd_sum.get(link.game.rd_company, Decimal("0")) + rd_amount
+    ch_tot = sum(channel_sum.values(), Decimal("0"))
+    rd_tot = sum(rd_sum.values(), Decimal("0"))
+    retention = total_gross - ch_tot - rd_tot
+    balance_delta = total_gross - ch_tot - rd_tot - retention
+    return {
+        "channel_sum": channel_sum,
+        "rd_sum": rd_sum,
+        "total_import_gross": total_gross,
+        "channel_split_total": ch_tot,
+        "rd_split_total": rd_tot,
+        "publisher_retention_total": retention,
+        "balance_delta": balance_delta,
+        "unmapped_gross": unmapped_gross,
+        "unmapped_row_count": unmapped_rows,
+        "mapped_row_count": len(rows) - unmapped_rows,
+        "raw_row_count": len(rows),
+    }
+
+
+@app.get("/billing/period-bridge")
+def get_billing_period_bridge(
+    period: str = Query(...),
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance, Role.biz, Role.ops])),
+):
+    task_ids = _active_confirmed_recon_task_ids_for_billing(db, period)
+    if len(task_ids) > 1:
+        raise HTTPException(status_code=400, detail=BILLING_PERIOD_MULTI_ACTIVE_CONFIRMED_IMPORTS)
+    if len(task_ids) == 0:
+        any_confirmed = db.scalars(select(ReconTask).where(ReconTask.period == period, ReconTask.status == ReconStatus.confirmed)).all()
+        if not any_confirmed:
+            raise HTTPException(status_code=400, detail="该账期无已确认核对任务")
+        raise HTTPException(
+            status_code=400,
+            detail="该账期无已确认且有效的导入批次（可能均已作废），请先在导入数据中心恢复有效批次或撤销入账后再生成账单。",
+        )
+    split = _compute_billing_split_from_raw(db, task_ids)
+    if split["raw_row_count"] == 0:
+        raise HTTPException(status_code=400, detail="无原始数据")
+    active_bills = db.scalars(select(Bill).where(Bill.period == period, Bill.lifecycle_status == "active")).all()
+    bills_ch = sum((Decimal(str(b.amount)) for b in active_bills if b.bill_type == BillType.channel), Decimal("0"))
+    bills_rd = sum((Decimal(str(b.amount)) for b in active_bills if b.bill_type == BillType.rd), Decimal("0"))
+    raw_ch: Decimal = split["channel_split_total"]
+    raw_rd: Decimal = split["rd_split_total"]
+
+    def _money_eq(a: Decimal, b: Decimal) -> bool:
+        return abs(a - b) <= Decimal("0.009")
+
+    return {
+        "period": period,
+        "recon_task_id": task_ids[0],
+        "total_import_gross": str(split["total_import_gross"]),
+        "channel_split_total": str(raw_ch),
+        "rd_split_total": str(raw_rd),
+        "publisher_retention_total": str(split["publisher_retention_total"]),
+        "balance_delta": str(split["balance_delta"]),
+        "unmapped_gross": str(split["unmapped_gross"]),
+        "unmapped_row_count": split["unmapped_row_count"],
+        "mapped_row_count": split["mapped_row_count"],
+        "raw_row_count": split["raw_row_count"],
+        "active_bills_channel_total": str(bills_ch),
+        "active_bills_rd_total": str(bills_rd),
+        "bills_match_raw_split": _money_eq(bills_ch, raw_ch) and _money_eq(bills_rd, raw_rd),
+        "note": (
+            "原始流水合计为唯一有效已确认批次下 RawStatement.gross 汇总；渠道/研发拆分为与「生成账单」相同映射与公式；"
+            "发行或公司保留=原始流水−渠道拆分合计−研发拆分合计（含未映射流水及单条流水分成剩余 1−渠道分成−研发分成）。"
+            "差额恒为 0；若有效账单合计与拆分不一致，说明账单未与当前数据同步，请覆盖重生成。"
+        ),
+    }
+
+
 @app.post("/billing/generate")
 def generate_bills(
     period: str = Query(...),
@@ -3691,22 +3785,11 @@ def generate_bills(
             status_code=400,
             detail="该账期无已确认且有效的导入批次（可能均已作废），请先在导入数据中心恢复有效批次或撤销入账后再生成账单。",
         )
-    rows = db.scalars(select(RawStatement).where(RawStatement.recon_task_id.in_(task_ids))).all()
-    if not rows:
+    split = _compute_billing_split_from_raw(db, task_ids)
+    if split["raw_row_count"] == 0:
         raise HTTPException(status_code=400, detail="无原始数据")
-    map_rows = db.scalars(select(ChannelGameMap)).all()
-    map_key = {(m.channel.name, m.game.name): m for m in map_rows}
-    channel_sum: dict[str, Decimal] = {}
-    rd_sum: dict[str, Decimal] = {}
-    for r in rows:
-        link = map_key.get((r.channel_name, r.game_name))
-        if not link:
-            continue
-        channel_amount = r.gross_amount * link.revenue_share_ratio
-        rd_amount = r.gross_amount * link.rd_settlement_ratio
-        bill_ch = _bill_channel_target_name(r.channel_name, link.channel.name)
-        channel_sum[bill_ch] = channel_sum.get(bill_ch, Decimal("0")) + channel_amount
-        rd_sum[link.game.rd_company] = rd_sum.get(link.game.rd_company, Decimal("0")) + rd_amount
+    channel_sum: dict[str, Decimal] = split["channel_sum"]
+    rd_sum: dict[str, Decimal] = split["rd_sum"]
     existing_key_map: dict[tuple[BillType, str], Bill] = {}
     for bill in active_period_bills:
         key = (bill.bill_type, bill.target_name)
