@@ -6,7 +6,7 @@ import { Alert, Button, Card, Descriptions, Drawer, Empty, Input, Modal, Select,
 import { apiRequest } from "@/lib/api";
 import { hasRole } from "@/lib/rbac";
 import { BillingRule, calcTrialResult, matchRuleForBill } from "@/lib/billingTrial";
-import { buildExportFilename, exportRowsToCsv, exportRowsToXlsx } from "@/lib/export";
+import { buildExportFilename, exportMultiSheetXlsx, exportRowsToCsv, exportRowsToXlsx } from "@/lib/export";
 
 type BillRow = {
   id: number;
@@ -287,32 +287,74 @@ export default function BillingPage() {
     const rule = matchRuleForBill(rules, detail.bill_type, detail.target_name);
     return calcTrialResult(baseGross, rule);
   }, [detail, rules]);
-  const exportBills = () => {
+  const exportBills = async () => {
     message.loading({ content: "正在导出数据...", key: "bill_export" });
-    const data = rowsWithTrial.map((x) => ({
-      账单ID: x.id,
-      账单类型: x.bill_type,
-      目标对象: x.target_name,
-      账期: x.period,
-      状态: x.flow_status || x.status,
-      流水: x.gross_amount ?? x.amount,
-      规则状态: x.trial?.matched ? "已匹配规则" : "未配置规则",
-      折扣后流水: x.trial?.discountedGross ?? "",
-      通道费金额: x.trial?.channelFeeAmount ?? "",
-      税额: x.trial?.taxAmount ?? "",
-      研发分成金额: x.trial?.rdShareAmount ?? "",
-      试算结算金额: x.trial?.settlementAmount ?? "",
-      试算利润: x.trial?.profit ?? "",
-      发送状态: x.status,
-      创建时间: "",
-      说明: "试算结果仅供前端预览核对，正式结算以后端结果为准",
-    }));
-    if (exportFormat === "csv") {
-      exportRowsToCsv(data, buildExportFilename("billing", "csv"));
-    } else {
-      exportRowsToXlsx(data, buildExportFilename("billing", "xlsx"));
+    try {
+      const data = rowsWithTrial.map((x) => ({
+        账单ID: x.id,
+        账单类型: x.bill_type === "channel" ? "渠道账单" : "研发账单",
+        对象: x.target_name,
+        账期: x.period,
+        流程状态: x.flow_status || x.status,
+        账单应结金额_拆分后: x.amount,
+        原始流水_仅接口返回时: x.gross_amount ?? "",
+        规则试算_匹配状态: x.trial?.matched ? "已匹配规则" : "未配置规则",
+        规则试算_折扣后基数: x.trial?.discountedGross ?? "",
+        规则试算_通道费金额: x.trial?.channelFeeAmount ?? "",
+        规则试算_税额: x.trial?.taxAmount ?? "",
+        规则试算_研发分成金额: x.trial?.rdShareAmount ?? "",
+        规则试算_结算金额: x.trial?.settlementAmount ?? "",
+        规则试算_利润: x.trial?.profit ?? "",
+        账单发送状态: x.status,
+        备注: "账单应结金额为系统按映射分成从已确认核对数据汇总后的拆分结果；规则试算列为前端预览，正式结算以后端为准。原始流水列与导入数据中心口径一致，仅在后端返回时填充。",
+      }));
+
+      if (exportFormat === "csv") {
+        exportRowsToCsv(data, buildExportFilename("账单拆分结果_账单金额明细", "csv"));
+        message.info("CSV 为单表；若需「口径桥接」汇总说明，请使用 Excel 导出。");
+      } else {
+        const q = new URLSearchParams();
+        q.set("period", period.trim());
+        q.set("lifecycle_status", "active");
+        const allActive = await apiRequest<BillRow[]>(`/billing/bills?${q.toString()}`);
+        const impQs = new URLSearchParams();
+        impQs.set("period", period.trim());
+        impQs.set("task_status", "已确认");
+        impQs.set("lifecycle_status", "active");
+        impQs.set("page", "1");
+        impQs.set("page_size", "1");
+        const imp = await apiRequest<{ summary?: { amount_sum?: string } }>(`/imports/history?${impQs.toString()}`);
+        const importGross = imp.summary?.amount_sum ?? "0";
+        const chTotal = allActive.filter((b) => b.bill_type === "channel").reduce((s, b) => s + Number(b.amount ?? 0), 0);
+        const rdTotal = allActive.filter((b) => b.bill_type === "rd").reduce((s, b) => s + Number(b.amount ?? 0), 0);
+        const bridgeRows = [
+          { 说明项: "账期", 内容: period.trim() },
+          { 说明项: "导入原始流水合计_已确认批次", 内容: importGross },
+          {
+            说明项: "口径提示",
+            内容:
+              "「导入原始流水合计」来自导入数据中心（本账期、已确认、有效批次汇总），为原始导入 gross 口径；与下方账单合计无直接相等关系。",
+          },
+          { 说明项: "渠道账单应结合计_拆分后", 内容: String(chTotal) },
+          { 说明项: "研发账单应结合计_拆分后", 内容: String(rdTotal) },
+          {
+            说明项: "为何与导入总流水不一致",
+            内容:
+              "账单行按渠道/研发分成比例从未映射前的流水拆分汇总；同一笔导入流水会同时计入渠道侧与研发侧两行账单。未映射渠道游戏、异常行或占位桶等可能未进入账单。对账请以本页拆分结果为准，核对原始导入请至「导入数据中心」。",
+          },
+        ];
+        exportMultiSheetXlsx(
+          [
+            { sheetName: "账单金额明细", rows: data as Record<string, unknown>[] },
+            { sheetName: "口径桥接说明", rows: bridgeRows as Record<string, unknown>[] },
+          ],
+          buildExportFilename("账单拆分结果", "xlsx"),
+        );
+      }
+      message.success({ content: "导出成功", key: "bill_export" });
+    } catch (e) {
+      message.error({ content: (e as Error).message, key: "bill_export" });
     }
-    message.success({ content: "导出成功", key: "bill_export" });
   };
 
   const selectedRows = useMemo(
@@ -449,6 +491,17 @@ export default function BillingPage() {
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
+      <Alert
+        type="info"
+        showIcon
+        message="本页金额口径：账单拆分 / 应结算"
+        description={
+          <>
+            列表与导出中的「账单应结金额」为按渠道游戏映射与分成规则，从<strong>已确认核对任务</strong>的原始数据拆分汇总后的<strong>渠道账单 / 研发账单</strong>金额，通常<strong>不等于</strong>导入数据中心的「原始流水」总额。
+            核对<strong>导入批次与原始 gross</strong>请前往「导入数据中心」；若需理解差额，请查看导出 Excel 中的「口径桥接说明」表。同一笔流水会分别计入渠道侧与研发侧，勿将两侧合计与单笔导入流水直接加减对比。
+          </>
+        }
+      />
       <Card title="账单生成">
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
           <Alert
@@ -524,7 +577,7 @@ export default function BillingPage() {
                 { label: "CSV", value: "csv" },
               ]}
             />
-            <Button onClick={exportBills}>导出账单</Button>
+            <Button onClick={() => void exportBills()}>导出账单拆分结果</Button>
             {hasRole(["admin"]) && (
               <Button danger onClick={cleanupDuplicateDraftBills}>
                 清理重复草稿账单
@@ -589,9 +642,13 @@ export default function BillingPage() {
           columns={
             reconMode
               ? [
-                  { title: "渠道", dataIndex: "target_name" },
-                  { title: "流水", dataIndex: "gross_amount", render: (v: number, r: BillRow) => v ?? r.amount ?? "-" },
-                  { title: "金额", dataIndex: "amount" },
+                  { title: "渠道/研发对象", dataIndex: "target_name" },
+                  {
+                    title: "原始流水(接口)",
+                    dataIndex: "gross_amount",
+                    render: (v: number | undefined) => (v !== undefined && v !== null ? v : "—"),
+                  },
+                  { title: "账单应结金额(拆分后)", dataIndex: "amount" },
                   { title: "已回款", dataIndex: "received_total", render: (v: number) => v ?? 0 },
                   { title: "未回款", dataIndex: "outstanding_amount", render: (v: number) => v ?? 0 },
                   {
@@ -620,14 +677,14 @@ export default function BillingPage() {
                 ]
               : [
                   { title: "ID", dataIndex: "id" },
-                  { title: "类型", dataIndex: "bill_type", render: (v: string) => <Tag>{v}</Tag> },
+                  { title: "类型", dataIndex: "bill_type", render: (v: string) => <Tag>{v === "channel" ? "渠道账单" : v === "rd" ? "研发账单" : v}</Tag> },
                   { title: "账期", dataIndex: "period" },
                   { title: "对象", dataIndex: "target_name" },
-                  { title: "流水(预留)", dataIndex: "gross_amount", render: (v: number) => v ?? "-" },
+                  { title: "原始流水(预留)", dataIndex: "gross_amount", render: (v: number) => v ?? "—" },
                   { title: "通道费(预留)", dataIndex: "channel_fee", render: (v: number) => v ?? "-" },
                   { title: "税点(预留)", dataIndex: "tax_rate", render: (v: number) => v ?? "-" },
                   { title: "研发分成(预留)", dataIndex: "rd_share", render: (v: number) => v ?? "-" },
-                  { title: "金额", dataIndex: "amount" },
+                  { title: "账单应结金额(拆分后)", dataIndex: "amount" },
                   { title: "开票状态", dataIndex: "invoice_status", render: (v: string) => <Tag color={v === "已开票" ? "green" : "orange"}>{v || "-"}</Tag> },
                   { title: "结算金额(预留)", dataIndex: "settlement_amount", render: (v: number) => v ?? "-" },
                   { title: "利润(预留)", dataIndex: "profit", render: (v: number) => v ?? "-" },
@@ -638,7 +695,7 @@ export default function BillingPage() {
                           dataIndex: ["trial", "matched"],
                           render: (v: boolean) => <Tag color={v ? "green" : "red"}>{v ? "已匹配规则" : "未配置规则"}</Tag>,
                         },
-                        { title: "折扣后流水", dataIndex: ["trial", "discountedGross"], render: (v: number) => (v ?? "-") },
+                        { title: "试算·折扣后基数", dataIndex: ["trial", "discountedGross"], render: (v: number) => (v ?? "-") },
                         { title: "通道费金额", dataIndex: ["trial", "channelFeeAmount"], render: (v: number) => (v ?? "-") },
                         { title: "税额", dataIndex: ["trial", "taxAmount"], render: (v: number) => (v ?? "-") },
                         { title: "研发分成金额", dataIndex: ["trial", "rdShareAmount"], render: (v: number) => (v ?? "-") },
@@ -700,7 +757,7 @@ export default function BillingPage() {
               <Descriptions.Item label="账单类型">{detail.bill_type}</Descriptions.Item>
               <Descriptions.Item label="账期">{detail.period}</Descriptions.Item>
               <Descriptions.Item label="对象">{detail.target_name}</Descriptions.Item>
-              <Descriptions.Item label="金额">{detail.amount}</Descriptions.Item>
+              <Descriptions.Item label="账单应结金额（拆分后）">{detail.amount}</Descriptions.Item>
               <Descriptions.Item label="账单状态">{detail.flow_status || detail.status}</Descriptions.Item>
               <Descriptions.Item label="开票状态">{detail.invoice_status || "-"}</Descriptions.Item>
               <Descriptions.Item label="回款状态">{detail.receipt_status || detail.collection_status || "-"}</Descriptions.Item>
@@ -713,14 +770,14 @@ export default function BillingPage() {
             <Card size="small" title="试算明细（前端预览，不替代正式结算）">
               <Descriptions column={1} bordered size="small">
                 <Descriptions.Item label="规则匹配">{detailTrial?.matched ? `已匹配：${detailTrial.ruleName}` : "未配置规则"}</Descriptions.Item>
-                <Descriptions.Item label="折扣后流水">{detailTrial?.discountedGross ?? "-"}</Descriptions.Item>
+                <Descriptions.Item label="试算·折扣后基数">{detailTrial?.discountedGross ?? "-"}</Descriptions.Item>
                 <Descriptions.Item label="通道费金额">{detailTrial?.channelFeeAmount ?? "-"}</Descriptions.Item>
                 <Descriptions.Item label="税额">{detailTrial?.taxAmount ?? "-"}</Descriptions.Item>
                 <Descriptions.Item label="研发分成金额">{detailTrial?.rdShareAmount ?? "-"}</Descriptions.Item>
                 <Descriptions.Item label="试算结算金额">{detailTrial?.settlementAmount ?? "-"}</Descriptions.Item>
                 <Descriptions.Item label="试算利润">{detailTrial?.profit ?? "-"}</Descriptions.Item>
                 <Descriptions.Item label="公式说明">
-                  折扣后流水=原流水*折扣系数；通道费金额=折扣后流水*通道费比例；税额=折扣后流水*税点比例；研发分成金额=折扣后流水*研发分成比例；试算结算金额=折扣后流水-通道费金额-税额-研发分成金额；试算利润=试算结算金额。
+                  试算基数=原流水*折扣系数；通道费金额=试算基数*通道费比例；税额=试算基数*税点比例；研发分成金额=试算基数*研发分成比例；试算结算金额=试算基数-通道费金额-税额-研发分成金额；试算利润=试算结算金额。
                 </Descriptions.Item>
               </Descriptions>
             </Card>

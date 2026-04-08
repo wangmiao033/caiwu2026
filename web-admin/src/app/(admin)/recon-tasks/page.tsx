@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
+  Alert,
   Button,
   Card,
   Col,
@@ -317,7 +318,11 @@ export default function ReconTasksPage() {
     try {
       message.loading({ content: "正在准备导出…", key: "import_export" });
       const raw = await apiRequest<Record<string, unknown>[]>(`/imports/history/${row.id}/raw-rows`);
-      exportRowsToXlsx(raw, buildExportFilename(`import_batch_${row.period}_${row.id}`, "xlsx"));
+      exportRowsToXlsx(
+        raw,
+        buildExportFilename(`导入原始流水明细_${row.period}_批次${row.id}`, "xlsx"),
+        "导入原始流水明细",
+      );
       message.success({ content: "导出完成", key: "import_export" });
     } catch (e) {
       message.error((e as Error).message);
@@ -384,7 +389,7 @@ export default function ReconTasksPage() {
           <Descriptions.Item label="账期">{detail.period}</Descriptions.Item>
           <Descriptions.Item label="导入时间">{detail.created_at}</Descriptions.Item>
           <Descriptions.Item label="操作人">{detail.created_by || "—"}</Descriptions.Item>
-          <Descriptions.Item label="总流水" span={2}>
+          <Descriptions.Item label="总流水（本批导入 gross 汇总）" span={2}>
             {fmtMoney(detail.amount_sum)}
           </Descriptions.Item>
         </Descriptions>
@@ -410,7 +415,7 @@ export default function ReconTasksPage() {
         columns={[
           { title: "渠道", dataIndex: "channel_name" },
           { title: "条数", dataIndex: "row_count", width: 100 },
-          { title: "流水合计", dataIndex: "gross_amount", render: (v: string) => fmtMoney(v) },
+          { title: "流水合计（导入 gross）", dataIndex: "gross_amount", render: (v: string) => fmtMoney(v) },
         ]}
       />
       <Typography.Title level={5}>按游戏汇总</Typography.Title>
@@ -424,7 +429,7 @@ export default function ReconTasksPage() {
         columns={[
           { title: "游戏", dataIndex: "game_name" },
           { title: "条数", dataIndex: "row_count", width: 100 },
-          { title: "流水合计", dataIndex: "gross_amount", render: (v: string) => fmtMoney(v) },
+          { title: "流水合计（导入 gross）", dataIndex: "gross_amount", render: (v: string) => fmtMoney(v) },
         ]}
       />
       {hasExceptions && batchStats && (
@@ -516,6 +521,13 @@ export default function ReconTasksPage() {
   );
 
   return (
+    <Space direction="vertical" size={16} style={{ width: "100%" }}>
+      <Alert
+        type="info"
+        showIcon
+        message="本页为「导入原始流水」口径"
+        description="统计、批次汇总、导出明细均基于导入文件中的 gross 等字段（原始流水），与「账单管理」页按分成拆分后的应结账单金额不是同一口径；两处总额不必相等。若需核对拆分后的账单金额，请前往账单管理并查看导出中的「口径桥接说明」。"
+      />
     <Card
       title="导入数据中心"
       extra={
@@ -598,7 +610,7 @@ export default function ReconTasksPage() {
         </Col>
         <Col xs={24} sm={12} md={8} lg={6} xl={4}>
           <Card size="small">
-            <Statistic title="总流水" value={fmtMoney(summary.amount_sum)} />
+            <Statistic title="总流水（导入 gross）" value={fmtMoney(summary.amount_sum)} />
           </Card>
         </Col>
         <Col xs={24} sm={12} md={8} lg={6} xl={4}>
@@ -639,7 +651,7 @@ export default function ReconTasksPage() {
           { title: "已匹配版本", dataIndex: "matched_variant_count", width: 100, render: (v) => v ?? "—" },
           { title: "未匹配版本", dataIndex: "unmatched_variant_count", width: 100, render: (v) => v ?? "—" },
           {
-            title: "流水合计",
+            title: "流水合计（导入）",
             dataIndex: "amount_sum",
             width: 120,
             render: (v) => fmtMoney(v),
@@ -755,5 +767,6 @@ export default function ReconTasksPage() {
         />
       </Drawer>
     </Card>
+    </Space>
   );
 }

@@ -10,10 +10,27 @@ export function buildExportFilename(prefix: string, ext: "xlsx" | "csv" = "xlsx"
   return `${prefix}_${stamp}.${ext}`;
 }
 
-export function exportRowsToXlsx(rows: Record<string, unknown>[], filename: string) {
+const XLSX_SHEET_MAX = 31;
+
+function safeSheetName(name: string, index: number): string {
+  const cleaned = name.replace(/[/\\*?:[\]]/g, "_").slice(0, XLSX_SHEET_MAX);
+  return cleaned || `Sheet${index + 1}`;
+}
+
+export function exportRowsToXlsx(rows: Record<string, unknown>[], filename: string, sheetName = "Sheet1") {
   const ws = XLSX.utils.json_to_sheet(rows);
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
+  XLSX.utils.book_append_sheet(wb, ws, safeSheetName(sheetName, 0));
+  XLSX.writeFile(wb, filename);
+}
+
+/** 多 sheet 导出（sheetName 会自动截断至 Excel 限制长度） */
+export function exportMultiSheetXlsx(sheets: { sheetName: string; rows: Record<string, unknown>[] }[], filename: string) {
+  const wb = XLSX.utils.book_new();
+  sheets.forEach(({ sheetName, rows }, i) => {
+    const ws = XLSX.utils.json_to_sheet(rows);
+    XLSX.utils.book_append_sheet(wb, ws, safeSheetName(sheetName, i));
+  });
   XLSX.writeFile(wb, filename);
 }
 
