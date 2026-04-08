@@ -137,6 +137,7 @@ type PrecheckKind =
   | "unmapped_pair"
   | "unmatched_variant"
   | "invalid_row"
+  | "suspicious_channel"
   | "missing_rd_share"
   | "missing_channel_map_share"
   | "missing_rule_config";
@@ -214,10 +215,46 @@ const PRECHECK_LABEL: Record<PrecheckKind, string> = {
   unmapped_pair: "未映射组合",
   unmatched_variant: "未匹配版本",
   invalid_row: "数据不完整",
+  suspicious_channel: "疑似异常渠道名",
   missing_rd_share: "缺研发分成",
   missing_channel_map_share: "缺渠道映射分成",
   missing_rule_config: "缺规则配置",
 };
+
+/** 与后端账单生成侧占位识别对齐，阻断明显脏渠道名进入导入 */
+function classifySuspiciousChannelName(ch: string): { bad: boolean; reason?: string } {
+  const s = String(ch || "").trim();
+  if (!s) {
+    return { bad: true, reason: "渠道名为空" };
+  }
+  const sl = s.toLowerCase();
+  const placeholders = new Set([
+    "待补充",
+    "未填写",
+    "未知",
+    "无",
+    "待定",
+    "null",
+    "none",
+    "-",
+    "—",
+    "n/a",
+    "na",
+    "tbd",
+    "(待补充)",
+    "【待补充】",
+  ]);
+  if (placeholders.has(s) || placeholders.has(sl)) {
+    return {
+      bad: true,
+      reason: "渠道名为占位/未知类用词，请在渠道管理与流水中改为正式渠道名称",
+    };
+  }
+  if (/^\d{1,3}$/.test(s)) {
+    return { bad: true, reason: "渠道名为 1～3 位纯数字，疑似占位或行号，请核对" };
+  }
+  return { bad: false };
+}
 
 function isValidRdSharePercent(v: unknown): boolean {
   if (v === null || v === undefined || v === "") return false;
@@ -322,6 +359,7 @@ function buildBillingRulesQuickHref(channel: string, game: string) {
 
 const PRECHECK_PANEL_ORDER: PrecheckKind[] = [
   "invalid_row",
+  "suspicious_channel",
   "unmatched_channel",
   "unmatched_game",
   "unmapped_pair",
@@ -335,7 +373,7 @@ const PRECHECK_PANEL_ORDER: PrecheckKind[] = [
 function renderPrecheckQuickAction(kind: PrecheckKind, row: PreviewRowPrecheck, push: (url: string) => void) {
   const ch = String(row.channel_name || "");
   const gm = String(row.game_name || "");
-  if (kind === "unmatched_channel") {
+  if (kind === "suspicious_channel" || kind === "unmatched_channel") {
     return (
       <Button type="link" size="small" onClick={() => push(buildChannelsQuickHref(ch))}>
         去渠道管理
@@ -710,6 +748,7 @@ export default function ImportPage() {
       unmapped_pair: 0,
       unmatched_variant: 0,
       invalid_row: 0,
+      suspicious_channel: 0,
       missing_rd_share: 0,
       missing_channel_map_share: 0,
       missing_rule_config: 0,
@@ -726,36 +765,42 @@ export default function ImportPage() {
       if (!ch || !gm || !amtOk || row.status === "异常") {
         precheck = "invalid_row";
         precheckReason = "渠道名、游戏名或流水缺失/异常";
-      } else if (!channelSet.has(ch)) {
-        precheck = "unmatched_channel";
-        precheckReason = "流水中的渠道在「渠道管理」中不存在，请新增或修正名称";
-      } else if (!gameSet.has(gm)) {
-        precheck = "unmatched_game";
-        precheckReason = "流水中的游戏在「游戏管理」中不存在，请新增或修正名称";
-      } else if (!mapSet.has(`${ch}::${gm}`)) {
-        precheck = "unmapped_pair";
-        precheckReason = "渠道与游戏尚未在「渠道-游戏映射」中关联";
       } else {
-        const gameRow = gameByName.get(gm);
-        const mapRow = mapByPair.get(`${ch}::${gm}`);
-        const rdOk = isValidRdSharePercent(gameRow?.rd_share_percent);
-        const chShareOk = mapRow ? isValidChannelShareRatio(mapRow.revenue_share_ratio) : false;
-        const ruleRes = ruleConfigurationOk(ch, gm, billingApiRules, localRulesRaw);
-
-        if (!rdOk) {
-          precheck = "missing_rd_share";
-          precheckReason = "游戏主数据中研发分成（%）缺失、为空或不合法（0–100），请在游戏管理中补全";
-        } else if (!chShareOk) {
-          precheck = "missing_channel_map_share";
-          precheckReason = "渠道-游戏映射中渠道分成比例缺失或非法（应为 0–100% 对应的小数比例），请在映射中补渠道分成";
-        } else if (!ruleRes.ok) {
-          precheck = "missing_rule_config";
-          precheckReason = ruleRes.reason;
-        } else if (row.variant_match_status === "未匹配版本") {
-          precheck = "unmatched_variant";
-          precheckReason = "未匹配到游戏版本，可在导入后于版本管理中处理（不阻断导入）";
+        const sus = classifySuspiciousChannelName(ch);
+        if (sus.bad) {
+          precheck = "suspicious_channel";
+          precheckReason = sus.reason;
+        } else if (!channelSet.has(ch)) {
+          precheck = "unmatched_channel";
+          precheckReason = "流水中的渠道在「渠道管理」中不存在，请新增或修正名称";
+        } else if (!gameSet.has(gm)) {
+          precheck = "unmatched_game";
+          precheckReason = "流水中的游戏在「游戏管理」中不存在，请新增或修正名称";
+        } else if (!mapSet.has(`${ch}::${gm}`)) {
+          precheck = "unmapped_pair";
+          precheckReason = "渠道与游戏尚未在「渠道-游戏映射」中关联";
         } else {
-          precheck = "normal";
+          const gameRow = gameByName.get(gm);
+          const mapRow = mapByPair.get(`${ch}::${gm}`);
+          const rdOk = isValidRdSharePercent(gameRow?.rd_share_percent);
+          const chShareOk = mapRow ? isValidChannelShareRatio(mapRow.revenue_share_ratio) : false;
+          const ruleRes = ruleConfigurationOk(ch, gm, billingApiRules, localRulesRaw);
+
+          if (!rdOk) {
+            precheck = "missing_rd_share";
+            precheckReason = "游戏主数据中研发分成（%）缺失、为空或不合法（0–100），请在游戏管理中补全";
+          } else if (!chShareOk) {
+            precheck = "missing_channel_map_share";
+            precheckReason = "渠道-游戏映射中渠道分成比例缺失或非法（应为 0–100% 对应的小数比例），请在映射中补渠道分成";
+          } else if (!ruleRes.ok) {
+            precheck = "missing_rule_config";
+            precheckReason = ruleRes.reason;
+          } else if (row.variant_match_status === "未匹配版本") {
+            precheck = "unmatched_variant";
+            precheckReason = "未匹配到游戏版本，可在导入后于版本管理中处理（不阻断导入）";
+          } else {
+            precheck = "normal";
+          }
         }
       }
 
@@ -764,6 +809,7 @@ export default function ImportPage() {
     });
 
     const blocked =
+      counts.suspicious_channel > 0 ||
       counts.unmatched_channel > 0 ||
       counts.unmatched_game > 0 ||
       counts.unmapped_pair > 0 ||
@@ -774,6 +820,7 @@ export default function ImportPage() {
 
     const grouped = {
       invalid_row: rowsWithPrecheck.filter((r) => r.precheck === "invalid_row"),
+      suspicious_channel: rowsWithPrecheck.filter((r) => r.precheck === "suspicious_channel"),
       unmatched_channel: rowsWithPrecheck.filter((r) => r.precheck === "unmatched_channel"),
       unmatched_game: rowsWithPrecheck.filter((r) => r.precheck === "unmatched_game"),
       unmapped_pair: rowsWithPrecheck.filter((r) => r.precheck === "unmapped_pair"),
@@ -1076,7 +1123,7 @@ export default function ImportPage() {
     }
     if (templatePrecheck.blocked) {
       message.error(
-        "导入前预检未通过：请处理未匹配渠道/游戏、未映射组合、数据不完整、缺研发分成、缺渠道映射分成或缺规则配置等问题后再导入"
+        "导入前预检未通过：请处理疑似异常渠道名、未匹配渠道/游戏、未映射组合、数据不完整、缺研发分成、缺渠道映射分成或缺规则配置等问题后再导入"
       );
       return;
     }
@@ -1371,11 +1418,12 @@ export default function ImportPage() {
                       <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
                         模板仅用于导入「流水」三列数据，不在模板里维护分成。研发分成、渠道映射分成与计费规则均由系统主数据、渠道-游戏映射与规则配置维护。若预检报错，请到对应页面补全配置，而不是改模板列结构。
                         <br />
-                        常见对应：未匹配渠道 → 渠道管理；未匹配游戏 / 缺研发分成 → 游戏管理；未映射组合 / 缺渠道映射分成 → 渠道-游戏映射；分成或规则不完整 → 游戏管理 / 渠道-游戏映射 / 规则配置。
+                        常见对应：疑似异常渠道名 / 未匹配渠道 → 渠道管理；未匹配游戏 / 缺研发分成 → 游戏管理；未映射组合 / 缺渠道映射分成 → 渠道-游戏映射；分成或规则不完整 → 游戏管理 / 渠道-游戏映射 / 规则配置。
                       </Typography.Paragraph>
                       <Space wrap style={{ marginBottom: 12 }}>
                         <Statistic title={PRECHECK_LABEL.normal} value={templatePrecheck.counts.normal} />
                         <Statistic title={PRECHECK_LABEL.invalid_row} value={templatePrecheck.counts.invalid_row} valueStyle={{ color: "#cf1322" }} />
+                        <Statistic title={PRECHECK_LABEL.suspicious_channel} value={templatePrecheck.counts.suspicious_channel} valueStyle={{ color: "#cf1322" }} />
                         <Statistic title={PRECHECK_LABEL.unmatched_channel} value={templatePrecheck.counts.unmatched_channel} valueStyle={{ color: "#cf1322" }} />
                         <Statistic title={PRECHECK_LABEL.unmatched_game} value={templatePrecheck.counts.unmatched_game} valueStyle={{ color: "#cf1322" }} />
                         <Statistic title={PRECHECK_LABEL.unmapped_pair} value={templatePrecheck.counts.unmapped_pair} valueStyle={{ color: "#fa8c16" }} />

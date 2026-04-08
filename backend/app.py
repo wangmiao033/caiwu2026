@@ -3590,6 +3590,47 @@ def export_rules(db: Session = Depends(get_db), _: dict = Depends(require_role([
     ]
 
 
+BILL_SUSPICIOUS_CHANNEL_BUCKET = "未匹配渠道（原始流水渠道名需修正）"
+
+
+def _is_placeholder_channel_label(name: Optional[str]) -> bool:
+    """占位或明显异常的渠道名字符串：不作为对外账单渠道名展示。"""
+    s = (name or "").strip()
+    if not s:
+        return True
+    sl = s.lower()
+    bad_tokens = {
+        "待补充",
+        "未填写",
+        "未知",
+        "无",
+        "待定",
+        "null",
+        "none",
+        "-",
+        "—",
+        "n/a",
+        "na",
+        "tbd",
+        "(待补充)",
+        "【待补充】",
+    }
+    if s in bad_tokens or sl in {x.lower() for x in bad_tokens}:
+        return True
+    # 较短纯数字多為行号/临时填充，避免当正式渠道名进账单
+    if s.isdigit() and len(s) <= 3:
+        return True
+    return False
+
+
+def _bill_channel_target_name(raw_statement_channel: str, canonical_channel_name: str) -> str:
+    raw = (raw_statement_channel or "").strip()
+    canon = (canonical_channel_name or "").strip()
+    if _is_placeholder_channel_label(raw) or _is_placeholder_channel_label(canon):
+        return BILL_SUSPICIOUS_CHANNEL_BUCKET
+    return raw
+
+
 @app.post("/billing/generate")
 def generate_bills(
     period: str = Query(...),
@@ -3622,7 +3663,8 @@ def generate_bills(
             continue
         channel_amount = r.gross_amount * link.revenue_share_ratio
         rd_amount = r.gross_amount * link.rd_settlement_ratio
-        channel_sum[r.channel_name] = channel_sum.get(r.channel_name, Decimal("0")) + channel_amount
+        bill_ch = _bill_channel_target_name(r.channel_name, link.channel.name)
+        channel_sum[bill_ch] = channel_sum.get(bill_ch, Decimal("0")) + channel_amount
         rd_sum[link.game.rd_company] = rd_sum.get(link.game.rd_company, Decimal("0")) + rd_amount
     existing_key_map: dict[tuple[BillType, str], Bill] = {}
     for bill in active_period_bills:
