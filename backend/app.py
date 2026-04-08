@@ -462,6 +462,50 @@ class ExceptionHandleRecord(Base):
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now(), index=True)
 
 
+class ContractStatus(str, enum.Enum):
+    draft = "draft"
+    active = "active"
+    expired = "expired"
+    void = "void"
+
+
+class ContractHeader(Base):
+    __tablename__ = "contract_headers"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    contract_no: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    contract_name: Mapped[str] = mapped_column(String(200))
+    channel_name: Mapped[str] = mapped_column(String(150), index=True)
+    platform_party_name: Mapped[str] = mapped_column(String(200), default="广州熊动科技有限公司")
+    platform_party_address: Mapped[str] = mapped_column(String(500), default="")
+    developer_party_name: Mapped[str] = mapped_column(String(200), default="")
+    developer_party_address: Mapped[str] = mapped_column(String(500), default="")
+    start_date: Mapped[dt.date] = mapped_column(Date, index=True)
+    end_date: Mapped[dt.date] = mapped_column(Date, index=True)
+    status: Mapped[ContractStatus] = mapped_column(Enum(ContractStatus), default=ContractStatus.draft, index=True)
+    remark: Mapped[str] = mapped_column(String(1000), default="")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
+    items: Mapped[list["ContractItem"]] = relationship(back_populates="contract", cascade="all, delete-orphan")
+
+
+class ContractItem(Base):
+    __tablename__ = "contract_items"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    contract_id: Mapped[int] = mapped_column(ForeignKey("contract_headers.id", ondelete="CASCADE"), index=True)
+    game_name: Mapped[str] = mapped_column(String(150), index=True)
+    discount_label: Mapped[str] = mapped_column(String(100), default="")
+    discount_rate: Mapped[Decimal] = mapped_column(Numeric(8, 4), default=Decimal("0"))
+    channel_share_percent: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("0"))
+    channel_fee_percent: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("0"))
+    tax_percent: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("0"))
+    private_percent: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("0"))
+    rd_share_note: Mapped[str] = mapped_column(String(500), default="")
+    is_active: Mapped[bool] = mapped_column(default=True, index=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
+    contract: Mapped["ContractHeader"] = relationship(back_populates="items")
+
+
 class ChannelIn(BaseModel):
     name: str
 
@@ -537,6 +581,32 @@ class ExceptionStatusPatchIn(BaseModel):
     id: str
     status: ExceptionHandleStatus
     remark: str = ""
+
+
+class ContractHeaderIn(BaseModel):
+    contract_no: str
+    contract_name: str
+    channel_name: str
+    platform_party_name: str = "广州熊动科技有限公司"
+    platform_party_address: str = ""
+    developer_party_name: str = ""
+    developer_party_address: str = ""
+    start_date: dt.date
+    end_date: dt.date
+    status: ContractStatus = ContractStatus.draft
+    remark: str = ""
+
+
+class ContractItemIn(BaseModel):
+    game_name: str
+    discount_label: str = ""
+    discount_rate: Decimal = Decimal("0")
+    channel_share_percent: Decimal = Decimal("0")
+    channel_fee_percent: Decimal = Decimal("0")
+    tax_percent: Decimal = Decimal("0")
+    private_percent: Decimal = Decimal("0")
+    rd_share_note: str = ""
+    is_active: bool = True
 
 
 class RuleBulkRow(BaseModel):
@@ -1027,6 +1097,15 @@ def normalize_variant_shares(payload: GameVariantIn) -> tuple[Optional[Decimal],
     return rd_share, publish_share
 
 
+def ensure_contract_tables():
+    """兼容旧库：补建 channel 合同表（create_all 通常为幂等，此处再保底一次）。"""
+    try:
+        ContractHeader.__table__.create(bind=engine, checkfirst=True)
+        ContractItem.__table__.create(bind=engine, checkfirst=True)
+    except Exception:
+        pass
+
+
 app = FastAPI(title="内部对账系统", version="1.0.0")
 
 
@@ -1038,6 +1117,7 @@ def startup():
     ensure_game_share_percent_column()
     ensure_bill_lifecycle_status_column()
     ensure_import_enrichment_columns()
+    ensure_contract_tables()
     with SessionLocal() as db:
         create_default_data(db)
 
@@ -1198,6 +1278,238 @@ def delete_channel(channel_id: int, db: Session = Depends(get_db), _: dict = Dep
     db.delete(row)
     db.commit()
     return {"id": channel_id, "deleted": True}
+
+
+def _contract_status_value(s: ContractStatus | str) -> str:
+    if isinstance(s, ContractStatus):
+        return s.value
+    return str(s)
+
+
+def _contract_item_dict(it: ContractItem) -> dict:
+    return {
+        "id": it.id,
+        "contract_id": it.contract_id,
+        "game_name": it.game_name,
+        "discount_label": it.discount_label or "",
+        "discount_rate": float(it.discount_rate) if it.discount_rate is not None else 0.0,
+        "channel_share_percent": float(it.channel_share_percent) if it.channel_share_percent is not None else 0.0,
+        "channel_fee_percent": float(it.channel_fee_percent) if it.channel_fee_percent is not None else 0.0,
+        "tax_percent": float(it.tax_percent) if it.tax_percent is not None else 0.0,
+        "private_percent": float(it.private_percent) if it.private_percent is not None else 0.0,
+        "rd_share_note": it.rd_share_note or "",
+        "is_active": bool(it.is_active),
+        "created_at": str(it.created_at) if it.created_at else "",
+        "updated_at": str(it.updated_at) if it.updated_at else "",
+    }
+
+
+def _contract_header_dict(h: ContractHeader, include_items: bool) -> dict:
+    d: dict = {
+        "id": h.id,
+        "contract_no": h.contract_no,
+        "contract_name": h.contract_name,
+        "channel_name": h.channel_name,
+        "platform_party_name": h.platform_party_name or "",
+        "platform_party_address": h.platform_party_address or "",
+        "developer_party_name": h.developer_party_name or "",
+        "developer_party_address": h.developer_party_address or "",
+        "start_date": h.start_date.isoformat() if h.start_date else None,
+        "end_date": h.end_date.isoformat() if h.end_date else None,
+        "status": _contract_status_value(h.status),
+        "remark": h.remark or "",
+        "created_at": str(h.created_at) if h.created_at else "",
+        "updated_at": str(h.updated_at) if h.updated_at else "",
+    }
+    if include_items:
+        items = sorted(h.items, key=lambda x: x.id)
+        d["items"] = [_contract_item_dict(x) for x in items]
+    return d
+
+
+@app.get("/contracts")
+def list_contracts(
+    channel: Optional[str] = Query(default=None),
+    status: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech, Role.ops])),
+):
+    stmt = select(ContractHeader).order_by(ContractHeader.id.desc())
+    if channel and channel.strip():
+        stmt = stmt.where(ContractHeader.channel_name.contains(channel.strip()))
+    if status and status.strip():
+        try:
+            st = ContractStatus(status.strip())
+            stmt = stmt.where(ContractHeader.status == st)
+        except ValueError:
+            pass
+    rows = db.scalars(stmt).all()
+    return [_contract_header_dict(r, False) for r in rows]
+
+
+@app.post("/contracts")
+def create_contract(
+    payload: ContractHeaderIn,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech])),
+):
+    cn = (payload.contract_no or "").strip()
+    if not cn:
+        raise HTTPException(status_code=400, detail="合同编号不能为空")
+    if db.scalar(select(ContractHeader).where(ContractHeader.contract_no == cn)):
+        raise HTTPException(status_code=400, detail="合同编号已存在")
+    if payload.end_date < payload.start_date:
+        raise HTTPException(status_code=400, detail="结束日期不能早于开始日期")
+    row = ContractHeader(
+        contract_no=cn,
+        contract_name=(payload.contract_name or "").strip() or cn,
+        channel_name=(payload.channel_name or "").strip(),
+        platform_party_name=(payload.platform_party_name or "广州熊动科技有限公司").strip() or "广州熊动科技有限公司",
+        platform_party_address=(payload.platform_party_address or "").strip(),
+        developer_party_name=(payload.developer_party_name or "").strip(),
+        developer_party_address=(payload.developer_party_address or "").strip(),
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+        status=payload.status,
+        remark=(payload.remark or "").strip(),
+    )
+    if not row.channel_name:
+        raise HTTPException(status_code=400, detail="渠道名称不能为空")
+    db.add(row)
+    db.flush()
+    write_system_audit(db, ctx["user"], "create_contract", "contract_header", str(row.id), f"新增合同: {row.contract_no}")
+    db.commit()
+    db.refresh(row)
+    return _contract_header_dict(row, False)
+
+
+@app.get("/contracts/{contract_id}")
+def get_contract(
+    contract_id: int,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech, Role.ops])),
+):
+    row = db.get(ContractHeader, contract_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="合同不存在")
+    return _contract_header_dict(row, True)
+
+
+@app.put("/contracts/{contract_id}")
+def update_contract(
+    contract_id: int,
+    payload: ContractHeaderIn,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech])),
+):
+    row = db.get(ContractHeader, contract_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="合同不存在")
+    cn = (payload.contract_no or "").strip()
+    if not cn:
+        raise HTTPException(status_code=400, detail="合同编号不能为空")
+    dup = db.scalar(select(ContractHeader).where(ContractHeader.contract_no == cn, ContractHeader.id != contract_id))
+    if dup:
+        raise HTTPException(status_code=400, detail="合同编号已存在")
+    if payload.end_date < payload.start_date:
+        raise HTTPException(status_code=400, detail="结束日期不能早于开始日期")
+    ch = (payload.channel_name or "").strip()
+    if not ch:
+        raise HTTPException(status_code=400, detail="渠道名称不能为空")
+    row.contract_no = cn
+    row.contract_name = (payload.contract_name or "").strip() or cn
+    row.channel_name = ch
+    row.platform_party_name = (payload.platform_party_name or "广州熊动科技有限公司").strip() or "广州熊动科技有限公司"
+    row.platform_party_address = (payload.platform_party_address or "").strip()
+    row.developer_party_name = (payload.developer_party_name or "").strip()
+    row.developer_party_address = (payload.developer_party_address or "").strip()
+    row.start_date = payload.start_date
+    row.end_date = payload.end_date
+    row.status = payload.status
+    row.remark = (payload.remark or "").strip()
+    row.updated_at = dt.datetime.now()
+    write_system_audit(db, ctx["user"], "update_contract", "contract_header", str(row.id), f"更新合同: {row.contract_no}")
+    db.commit()
+    db.refresh(row)
+    return _contract_header_dict(row, True)
+
+
+@app.post("/contracts/{contract_id}/items")
+def create_contract_item(
+    contract_id: int,
+    payload: ContractItemIn,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech])),
+):
+    header = db.get(ContractHeader, contract_id)
+    if not header:
+        raise HTTPException(status_code=404, detail="合同不存在")
+    gm = (payload.game_name or "").strip()
+    if not gm:
+        raise HTTPException(status_code=400, detail="游戏名称不能为空")
+    row = ContractItem(
+        contract_id=contract_id,
+        game_name=gm,
+        discount_label=(payload.discount_label or "").strip(),
+        discount_rate=payload.discount_rate,
+        channel_share_percent=payload.channel_share_percent,
+        channel_fee_percent=payload.channel_fee_percent,
+        tax_percent=payload.tax_percent,
+        private_percent=payload.private_percent,
+        rd_share_note=(payload.rd_share_note or "").strip(),
+        is_active=bool(payload.is_active),
+    )
+    db.add(row)
+    db.flush()
+    write_system_audit(db, ctx["user"], "create_contract_item", "contract_item", str(row.id), f"合同{contract_id} 新增明细: {gm}")
+    db.commit()
+    db.refresh(row)
+    return _contract_item_dict(row)
+
+
+@app.put("/contract-items/{item_id}")
+def update_contract_item(
+    item_id: int,
+    payload: ContractItemIn,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech])),
+):
+    row = db.get(ContractItem, item_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="合同明细不存在")
+    gm = (payload.game_name or "").strip()
+    if not gm:
+        raise HTTPException(status_code=400, detail="游戏名称不能为空")
+    row.game_name = gm
+    row.discount_label = (payload.discount_label or "").strip()
+    row.discount_rate = payload.discount_rate
+    row.channel_share_percent = payload.channel_share_percent
+    row.channel_fee_percent = payload.channel_fee_percent
+    row.tax_percent = payload.tax_percent
+    row.private_percent = payload.private_percent
+    row.rd_share_note = (payload.rd_share_note or "").strip()
+    row.is_active = bool(payload.is_active)
+    row.updated_at = dt.datetime.now()
+    write_system_audit(db, ctx["user"], "update_contract_item", "contract_item", str(row.id), f"更新明细: {gm}")
+    db.commit()
+    db.refresh(row)
+    return _contract_item_dict(row)
+
+
+@app.delete("/contract-items/{item_id}")
+def delete_contract_item(
+    item_id: int,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.tech])),
+):
+    row = db.get(ContractItem, item_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="合同明细不存在")
+    cid = row.contract_id
+    db.delete(row)
+    write_system_audit(db, ctx["user"], "delete_contract_item", "contract_item", str(item_id), f"合同{cid} 删除明细")
+    db.commit()
+    return {"id": item_id, "deleted": True}
 
 
 @app.post("/games")
