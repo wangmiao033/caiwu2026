@@ -1717,7 +1717,9 @@ def revert_confirm_recon(
         raise HTTPException(status_code=400, detail="已作废批次不可撤销入账")
 
     period = task.period
-    bill_cnt = int(db.scalar(select(func.count(Bill.id)).where(Bill.period == period)) or 0)
+    bill_cnt = int(
+        db.scalar(select(func.count(Bill.id)).where(Bill.period == period, Bill.lifecycle_status == "active")) or 0
+    )
     if bill_cnt > 0:
         raise HTTPException(status_code=400, detail="该账期已生成账单，禁止撤销入账")
 
