@@ -2,145 +2,158 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import {
-  AppstoreOutlined,
-  ApartmentOutlined,
-  AlertOutlined,
-  AuditOutlined,
-  CheckCircleOutlined,
-  ClusterOutlined,
-  DollarOutlined,
-  FileExcelOutlined,
-  FileProtectOutlined,
-  FileTextOutlined,
-  FolderOpenOutlined,
-  GiftOutlined,
-  HomeOutlined,
-  LogoutOutlined,
-  MoneyCollectOutlined,
-  ReconciliationOutlined,
-  SettingOutlined,
-  ShopOutlined,
-} from "@ant-design/icons";
+import { AppstoreOutlined, LogoutOutlined, MenuFoldOutlined, MenuUnfoldOutlined } from "@ant-design/icons";
+import { Breadcrumb, Button, Grid, Layout, Menu, Space, Typography } from "antd";
 import type { MenuProps } from "antd";
-import { Button, Layout, Menu, Space, Typography } from "antd";
+import {
+  defaultOpenKeys,
+  getBreadcrumbs,
+  getVisibleMenuGroups,
+  groupsToAntdMenuItems,
+  readStoredOpenKeys,
+  resolveNavigatePath,
+  resolveSelectedMenuKey,
+  writeStoredOpenKeys,
+} from "@/config/adminMenu";
 import { getCurrentRole } from "@/lib/rbac";
 
 const { Header, Sider, Content } = Layout;
+const { useBreakpoint } = Grid;
 
-const allMenuItems: MenuProps["items"] = [
-  { key: "/home", icon: <HomeOutlined />, label: "首页看板" },
-  { key: "/channels", icon: <ShopOutlined />, label: "渠道管理" },
-  { key: "/games", icon: <GiftOutlined />, label: "游戏管理" },
-  { key: "/projects", icon: <FolderOpenOutlined />, label: "项目管理" },
-  { key: "/game-variants", icon: <ApartmentOutlined />, label: "版本管理" },
-  { key: "/channel-game-map", icon: <ClusterOutlined />, label: "渠道游戏映射" },
-  { key: "/import", icon: <FileExcelOutlined />, label: "Excel导入" },
-  { key: "/recon-tasks", icon: <CheckCircleOutlined />, label: "导入数据中心" },
-  { key: "/billing", icon: <ReconciliationOutlined />, label: "账单管理" },
-  { key: "/billing-rules", icon: <SettingOutlined />, label: "规则配置" },
-  { key: "/contracts", icon: <FileProtectOutlined />, label: "合同管理" },
-  {
-    key: "grp-monthly-settlement",
-    icon: <FileExcelOutlined />,
-    label: "渠道月度结算对账单",
-    children: [
-      { key: "/settlement-imports", label: "导入管理" },
-      { key: "/settlement-details", label: "结算明细" },
-      { key: "/settlement-statements", label: "月度账单" },
-    ],
-  },
-  { key: "/channel-settlement-statements", icon: <ReconciliationOutlined />, label: "渠道结算对账单" },
-  { key: "/exceptions", icon: <AlertOutlined />, label: "异常中心" },
-  { key: "/invoices", icon: <FileTextOutlined />, label: "发票管理" },
-  { key: "/receipts", icon: <MoneyCollectOutlined />, label: "回款管理" },
-  { key: "/finance", icon: <DollarOutlined />, label: "财务看板" },
-  { key: "/user-management", icon: <SettingOutlined />, label: "用户管理" },
-  { key: "/audit-logs", icon: <AuditOutlined />, label: "审计日志" },
-];
-
-function filterMenuByRole(items: MenuProps["items"], role: string): MenuProps["items"] {
-  const out: MenuProps["items"] = [];
-  for (const raw of items || []) {
-    if (!raw) continue;
-    if ("children" in raw && raw.children) {
-      const children = filterMenuByRole(raw.children, role);
-      if (children?.length) {
-        out.push({ ...raw, children });
-      }
-      continue;
-    }
-    const key = "key" in raw ? String(raw.key) : "";
-    if (key === "/user-management" && role !== "admin") continue;
-    if (key === "/channel-settlement-statements" && role === "tech") continue;
-    if (role === "ops_manager" && key === "/import") continue;
-    if (role === "tech" && key === "/billing-rules") continue;
-    out.push(raw);
-  }
-  return out;
-}
-
-function resolveMenuSelectedKey(pathname: string, items: MenuProps["items"]): string {
-  let best = "";
-  for (const raw of items || []) {
-    if (!raw) continue;
-    if ("children" in raw && raw.children) {
-      const sub = resolveMenuSelectedKey(pathname, raw.children);
-      if (sub.length > best.length) best = sub;
-    } else if ("key" in raw) {
-      const k = String(raw.key);
-      if (pathname === k || pathname.startsWith(`${k}/`)) {
-        if (k.length > best.length) best = k;
-      }
-    }
-  }
-  return best;
+function filterValidGroupKeys(keys: string[], allowed: Set<string>): string[] {
+  return keys.filter((k) => allowed.has(k));
 }
 
 export default function AdminShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const role = getCurrentRole();
-  const [openKeys, setOpenKeys] = useState<string[]>([]);
+  const screens = useBreakpoint();
 
-  const visibleMenuItems = useMemo(() => filterMenuByRole(allMenuItems, role), [role]);
+  const visibleGroups = useMemo(() => getVisibleMenuGroups(role), [role]);
+  const groupKeySet = useMemo(() => new Set(visibleGroups.map((g) => g.key)), [visibleGroups]);
 
-  const selectedKey = useMemo(
-    () => resolveMenuSelectedKey(pathname, visibleMenuItems) || "/home",
-    [pathname, visibleMenuItems]
+  const antdMenuItems = useMemo<MenuProps["items"]>(
+    () => groupsToAntdMenuItems(visibleGroups),
+    [visibleGroups]
   );
 
+  const selectedKey = useMemo(
+    () => resolveSelectedMenuKey(pathname, visibleGroups),
+    [pathname, visibleGroups]
+  );
+
+  const breadcrumbItems = useMemo(
+    () => getBreadcrumbs(pathname, visibleGroups),
+    [pathname, visibleGroups]
+  );
+
+  const [openKeys, setOpenKeys] = useState<string[]>([]);
+  const [siderCollapsed, setSiderCollapsed] = useState(true);
+
+  const narrow = screens.md === false;
+
   useEffect(() => {
-    if (
-      pathname.startsWith("/settlement-imports") ||
-      pathname.startsWith("/settlement-details") ||
-      pathname.startsWith("/settlement-statements")
-    ) {
-      setOpenKeys(["grp-monthly-settlement"]);
+    const stored = readStoredOpenKeys();
+    const fallback = defaultOpenKeys(pathname, visibleGroups);
+    const merged = stored?.length
+      ? [...new Set([...filterValidGroupKeys(stored, groupKeySet), ...fallback])]
+      : fallback;
+    setOpenKeys(merged);
+  }, [pathname, visibleGroups, groupKeySet]);
+
+  useEffect(() => {
+    if (narrow) setSiderCollapsed(true);
+    else setSiderCollapsed(false);
+  }, [narrow]);
+
+  const onOpenChange = (keys: string[]) => {
+    const valid = filterValidGroupKeys(keys, groupKeySet);
+    setOpenKeys(valid);
+    writeStoredOpenKeys(valid);
+  };
+
+  const onMenuClick: MenuProps["onClick"] = ({ key }) => {
+    const target = resolveNavigatePath(String(key), visibleGroups);
+    if (target) {
+      router.push(target);
+      if (narrow) setSiderCollapsed(true);
     }
-  }, [pathname]);
+  };
 
   const xUser = typeof window !== "undefined" ? localStorage.getItem("x_user") || "finance_user" : "finance_user";
 
+  const breadcrumbAntdItems = breadcrumbItems.map((b, i) => {
+    const isLast = i === breadcrumbItems.length - 1;
+    return {
+      title:
+        b.path && !isLast ? (
+          <span
+            role="link"
+            tabIndex={0}
+            onClick={() => router.push(b.path!)}
+            onKeyDown={(e) => e.key === "Enter" && router.push(b.path!)}
+            style={{ cursor: "pointer", color: "var(--ant-color-primary)" }}
+          >
+            {b.title}
+          </span>
+        ) : (
+          b.title
+        ),
+    };
+  });
+
   return (
     <Layout style={{ minHeight: "100vh" }}>
-      <Sider width={220} theme="light">
+      <Sider
+        width={220}
+        theme="light"
+        collapsed={narrow ? siderCollapsed : false}
+        collapsedWidth={0}
+        trigger={null}
+        style={{
+          position: narrow ? "fixed" : "relative",
+          left: 0,
+          top: 0,
+          bottom: 0,
+          zIndex: narrow ? 1000 : undefined,
+          height: "100vh",
+          overflow: "auto",
+        }}
+      >
         <div style={{ padding: 16, fontWeight: 600 }}>
           <Space>
             <AppstoreOutlined />
-            公司对账后台
+            {!narrow && <span>公司对账后台</span>}
           </Space>
         </div>
         <Menu
           mode="inline"
-          selectedKeys={[selectedKey]}
+          theme="light"
+          selectedKeys={selectedKey ? [selectedKey] : []}
           openKeys={openKeys}
-          onOpenChange={(keys) => setOpenKeys(keys as string[])}
-          items={visibleMenuItems}
-          onClick={(e) => router.push(e.key)}
+          onOpenChange={onOpenChange}
+          items={antdMenuItems}
+          onClick={onMenuClick}
         />
       </Sider>
-      <Layout>
+      {narrow && !siderCollapsed ? (
+        <button
+          type="button"
+          aria-label="关闭菜单"
+          onClick={() => setSiderCollapsed(true)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 999,
+            background: "rgba(0,0,0,0.45)",
+            border: "none",
+            padding: 0,
+            cursor: "pointer",
+          }}
+        />
+      ) : null}
+      <Layout style={{ flex: 1, minWidth: 0 }}>
         <Header
           style={{
             background: "#fff",
@@ -149,11 +162,25 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
             alignItems: "center",
             justifyContent: "space-between",
             paddingInline: 16,
+            gap: 12,
+            flexWrap: "wrap",
           }}
         >
-          <Typography.Text>财务结算管理系统</Typography.Text>
+          <Space size="middle" style={{ flex: 1, minWidth: 0 }}>
+            {narrow ? (
+              <Button
+                type="text"
+                icon={siderCollapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+                onClick={() => setSiderCollapsed((c) => !c)}
+                aria-label="菜单"
+              />
+            ) : null}
+            <Breadcrumb style={{ minWidth: 0 }} items={breadcrumbAntdItems} />
+          </Space>
           <Space>
-            <Typography.Text type="secondary">{xUser}</Typography.Text>
+            <Typography.Text type="secondary" ellipsis>
+              {xUser}
+            </Typography.Text>
             <Button
               icon={<LogoutOutlined />}
               onClick={() => {
@@ -168,7 +195,7 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
             </Button>
           </Space>
         </Header>
-        <Content style={{ margin: 16 }}>{children}</Content>
+        <Content style={{ margin: narrow ? 12 : 16 }}>{children}</Content>
       </Layout>
     </Layout>
   );
