@@ -32,6 +32,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     create_engine,
+    delete,
     func,
     inspect,
     select,
@@ -182,6 +183,8 @@ class Game(Base):
     __tablename__ = "games"
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(150), unique=True, index=True)
+    # 可选业务编码；导入时可按编码匹配游戏
+    game_code: Mapped[Optional[str]] = mapped_column(String(80), nullable=True, index=True)
     rd_company: Mapped[str] = mapped_column(String(150))
     # 研发分成（百分比 0~100），作为游戏级固定值；渠道-游戏映射页将优先使用该值
     rd_share_percent: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("0"))
@@ -457,6 +460,141 @@ class ChannelSettlementStatementItem(Base):
     game: Mapped[Game] = relationship()
 
 
+class ChannelGameContract(Base):
+    """渠道-游戏月度结算合同（分成与签章信息）；主数据仍关联 channels / games。"""
+
+    __tablename__ = "channel_game_contracts"
+    __table_args__ = (
+        UniqueConstraint("channel_id", "game_id", "effective_start_date", name="uq_cgc_channel_game_start"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), index=True)
+    game_id: Mapped[int] = mapped_column(ForeignKey("games.id"), index=True)
+    effective_start_date: Mapped[dt.date] = mapped_column(Date, index=True)
+    effective_end_date: Mapped[Optional[dt.date]] = mapped_column(Date, nullable=True)
+    revenue_share_ratio: Mapped[Decimal] = mapped_column(Numeric(8, 4), default=Decimal("0.3000"))
+    channel_fee_ratio: Mapped[Decimal] = mapped_column(Numeric(8, 4), default=Decimal("0"))
+    deduct_test_fee: Mapped[bool] = mapped_column(default=True)
+    deduct_coupon_fee: Mapped[bool] = mapped_column(default=True)
+    our_company_name: Mapped[str] = mapped_column(String(200), default="")
+    our_company_address: Mapped[str] = mapped_column(String(400), default="")
+    our_company_phone: Mapped[str] = mapped_column(String(100), default="")
+    our_tax_no: Mapped[str] = mapped_column(String(80), default="")
+    our_bank_name: Mapped[str] = mapped_column(String(200), default="")
+    our_bank_account: Mapped[str] = mapped_column(String(80), default="")
+    opposite_company_name: Mapped[str] = mapped_column(String(200), default="")
+    opposite_tax_no: Mapped[str] = mapped_column(String(80), default="")
+    opposite_bank_name: Mapped[str] = mapped_column(String(200), default="")
+    opposite_bank_account: Mapped[str] = mapped_column(String(80), default="")
+    statement_title_template: Mapped[str] = mapped_column(String(300), default="")
+    remark: Mapped[str] = mapped_column(String(500), default="")
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now(), onupdate=func.now())
+
+
+class SettlementImportBatch(Base):
+    __tablename__ = "import_batches"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    batch_name: Mapped[str] = mapped_column(String(200), default="")
+    source_file_name: Mapped[str] = mapped_column(String(500), default="")
+    settlement_month: Mapped[str] = mapped_column(String(20), index=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), index=True)
+    import_type: Mapped[str] = mapped_column(String(20), default="excel")
+    total_rows: Mapped[int] = mapped_column(default=0)
+    success_rows: Mapped[int] = mapped_column(default=0)
+    failed_rows: Mapped[int] = mapped_column(default=0)
+    import_status: Mapped[str] = mapped_column(String(30), default="completed", index=True)
+    error_summary: Mapped[str] = mapped_column(String(2000), default="")
+    created_by: Mapped[str] = mapped_column(String(100), default="system")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now(), onupdate=func.now())
+
+
+class SettlementDetailRow(Base):
+    __tablename__ = "settlement_details"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    batch_id: Mapped[int] = mapped_column(ForeignKey("import_batches.id"), index=True)
+    settlement_month: Mapped[str] = mapped_column(String(20), index=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), index=True)
+    game_id: Mapped[Optional[int]] = mapped_column(ForeignKey("games.id"), index=True, nullable=True)
+    raw_game_name: Mapped[str] = mapped_column(String(200), default="")
+    game_name_snapshot: Mapped[str] = mapped_column(String(200), default="")
+    gross_revenue: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    test_fee: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    coupon_fee: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    participation_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    revenue_share_ratio: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 4), nullable=True)
+    channel_fee_ratio: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 4), nullable=True)
+    settlement_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    row_status: Mapped[str] = mapped_column(String(30), default="normal", index=True)
+    error_message: Mapped[str] = mapped_column(String(500), default="")
+    remark: Mapped[str] = mapped_column(String(500), default="")
+    monthly_statement_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("settlement_statements.id"), index=True, nullable=True
+    )
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now(), onupdate=func.now())
+
+
+class ChannelMonthlySettlementStatement(Base):
+    __tablename__ = "settlement_statements"
+    __table_args__ = (UniqueConstraint("settlement_month", "channel_id", name="uq_monthly_stmt_month_channel"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    statement_no: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    settlement_month: Mapped[str] = mapped_column(String(20), index=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), index=True)
+    statement_title: Mapped[str] = mapped_column(String(500), default="")
+    our_company_name: Mapped[str] = mapped_column(String(200), default="")
+    opposite_company_name: Mapped[str] = mapped_column(String(200), default="")
+    total_gross_revenue: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    total_test_fee: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    total_coupon_fee: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    total_participation_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    total_settlement_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    total_settlement_amount_cn: Mapped[str] = mapped_column(String(300), default="")
+    statement_status: Mapped[str] = mapped_column(String(30), default="draft", index=True)
+    confirmed_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime, nullable=True)
+    exported_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime, nullable=True)
+    paid_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime, nullable=True)
+    remark: Mapped[str] = mapped_column(String(1000), default="")
+    our_company_address: Mapped[str] = mapped_column(String(400), default="")
+    our_company_phone: Mapped[str] = mapped_column(String(100), default="")
+    our_tax_no: Mapped[str] = mapped_column(String(80), default="")
+    our_bank_name: Mapped[str] = mapped_column(String(200), default="")
+    our_bank_account: Mapped[str] = mapped_column(String(80), default="")
+    opposite_tax_no: Mapped[str] = mapped_column(String(80), default="")
+    opposite_bank_name: Mapped[str] = mapped_column(String(200), default="")
+    opposite_bank_account: Mapped[str] = mapped_column(String(80), default="")
+    created_by: Mapped[str] = mapped_column(String(100), default="system")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now(), onupdate=func.now())
+
+
+class ChannelMonthlySettlementItem(Base):
+    __tablename__ = "settlement_statement_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    statement_id: Mapped[int] = mapped_column(ForeignKey("settlement_statements.id"), index=True)
+    sort_no: Mapped[int] = mapped_column(default=0)
+    settlement_month: Mapped[str] = mapped_column(String(20), default="")
+    game_name: Mapped[str] = mapped_column(String(200), default="")
+    gross_revenue: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    test_fee: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    coupon_fee: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    participation_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    revenue_share_ratio: Mapped[Decimal] = mapped_column(Numeric(8, 4), default=Decimal("0"))
+    channel_fee_ratio: Mapped[Decimal] = mapped_column(Numeric(8, 4), default=Decimal("0"))
+    settlement_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    remark: Mapped[str] = mapped_column(String(500), default="")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=func.now(), onupdate=func.now())
+
+
 class ExceptionHandleStatus(str, enum.Enum):
     pending = "pending"
     ignored = "ignored"
@@ -536,6 +674,7 @@ class GameIn(BaseModel):
     name: str
     rd_company: str
     rd_share_percent: Decimal = Decimal("0")
+    game_code: Optional[str] = None
 
 
 class ProjectIn(BaseModel):
@@ -763,6 +902,50 @@ class SettlementGenerateAllForPeriodIn(BaseModel):
 
 class SettlementReconciliationStatusIn(BaseModel):
     reconciliation_status: Literal["pending", "confirmed", "exported"]
+
+
+class MonthlySettlementGenerateIn(BaseModel):
+    settlement_month: str
+    channel_id: int
+    overwrite: bool = False
+
+
+class MonthlySettlementStatusPatchIn(BaseModel):
+    statement_status: Literal["draft", "pending_confirm", "confirmed", "exported", "paid"]
+
+
+class SettlementDetailPatchIn(BaseModel):
+    game_id: Optional[int] = None
+    test_fee: Optional[Decimal] = None
+    coupon_fee: Optional[Decimal] = None
+    revenue_share_ratio: Optional[Decimal] = None
+    channel_fee_ratio: Optional[Decimal] = None
+    remark: Optional[str] = None
+    row_status: Optional[Literal["normal", "error", "pending_confirm"]] = None
+
+
+class SettlementContractIn(BaseModel):
+    channel_id: int
+    game_id: int
+    effective_start_date: dt.date
+    effective_end_date: Optional[dt.date] = None
+    revenue_share_ratio: Decimal = Decimal("0.3")
+    channel_fee_ratio: Decimal = Decimal("0")
+    deduct_test_fee: bool = True
+    deduct_coupon_fee: bool = True
+    our_company_name: str = ""
+    our_company_address: str = ""
+    our_company_phone: str = ""
+    our_tax_no: str = ""
+    our_bank_name: str = ""
+    our_bank_account: str = ""
+    opposite_company_name: str = ""
+    opposite_tax_no: str = ""
+    opposite_bank_name: str = ""
+    opposite_bank_account: str = ""
+    statement_title_template: str = ""
+    remark: str = ""
+    status: str = "active"
 
 
 class BillStatusIn(BaseModel):
@@ -1290,6 +1473,19 @@ def ensure_settlement_statement_v2_columns():
         pass
 
 
+def ensure_game_code_column():
+    try:
+        inspector = inspect(engine)
+        if "games" not in inspector.get_table_names():
+            return
+        cols = {c["name"] for c in inspector.get_columns("games")}
+        if "game_code" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE games ADD COLUMN game_code VARCHAR(80)"))
+    except Exception:
+        pass
+
+
 app = FastAPI(title="内部对账系统", version="1.0.0")
 
 # 浏览器直连后端（如合同 PDF 识别）需跨域；默认 * + 无 credentials，与 Bearer 头兼容。生产可用 CORS_ALLOW_ORIGINS 收紧。
@@ -1314,6 +1510,7 @@ def startup():
     ensure_import_enrichment_columns()
     ensure_contract_tables()
     ensure_settlement_statement_v2_columns()
+    ensure_game_code_column()
     with SessionLocal() as db:
         create_default_data(db)
 
@@ -2424,7 +2621,13 @@ def contract_excel_commit(
 def create_game(payload: GameIn, db: Session = Depends(get_db), ctx: dict = Depends(require_role([Role.admin, Role.biz, Role.ops]))):
     if payload.rd_share_percent < 0 or payload.rd_share_percent > 100:
         raise HTTPException(status_code=400, detail="研发分成需在 0~100 之间")
-    game = Game(name=payload.name, rd_company=payload.rd_company, rd_share_percent=payload.rd_share_percent)
+    gc = (payload.game_code or "").strip() or None
+    game = Game(
+        name=payload.name,
+        rd_company=payload.rd_company,
+        rd_share_percent=payload.rd_share_percent,
+        game_code=gc,
+    )
     db.add(game)
     db.flush()
     write_system_audit(db, ctx["user"], "create_game", "game", str(game.id), f"新增游戏: {payload.name}")
@@ -2487,6 +2690,7 @@ def update_game(game_id: int, payload: GameIn, db: Session = Depends(get_db), _:
     row.name = payload.name
     row.rd_company = payload.rd_company
     row.rd_share_percent = payload.rd_share_percent
+    row.game_code = (payload.game_code or "").strip() or None
     write_system_audit(db, _["user"], "update_game", "game", str(row.id), f"编辑游戏: {payload.name}")
     db.commit()
     return {"id": row.id, "name": row.name}
@@ -5934,3 +6138,1060 @@ def list_audit_logs_compat(
     _: dict = Depends(require_role([Role.admin])),
 ):
     return db.scalars(select(SystemAuditLog).order_by(SystemAuditLog.id.desc()).limit(200)).all()
+
+
+# --- 渠道月度结算对账单（导入 → 明细 → 生成账单），API 前缀 monthly-settlement-* 与旧版 /settlement-statements 区分 ---
+
+MONTHLY_SETTLEMENT_READ_ROLES = [
+    Role.admin,
+    Role.finance_manager,
+    Role.finance,
+    Role.ops_manager,
+    Role.ops,
+    Role.tech,
+    Role.biz,
+]
+MONTHLY_SETTLEMENT_WRITE_ROLES = [Role.admin, Role.finance_manager, Role.finance, Role.ops_manager, Role.ops]
+
+_CAPITAL_NUMS = ["零", "壹", "贰", "叁", "肆", "伍", "陆", "柒", "捌", "玖"]
+_CAPITAL_UNITS = ["", "拾", "佰", "仟"]
+
+
+def _section_to_chinese(section: int) -> str:
+    s = ""
+    zero = False
+    for i in range(3, -1, -1):
+        d = section // (10**i) % 10
+        if d == 0:
+            zero = True
+        else:
+            if zero:
+                s += _CAPITAL_NUMS[0]
+                zero = False
+            s += _CAPITAL_NUMS[d] + _CAPITAL_UNITS[i]
+    s = s.rstrip(_CAPITAL_NUMS[0])
+    return s or _CAPITAL_NUMS[0]
+
+
+def _integer_part_to_chinese(n: int) -> str:
+    if n == 0:
+        return _CAPITAL_NUMS[0]
+    parts: list[str] = []
+    unit_large = ["", "万", "亿"]
+    idx = 0
+    while n > 0 and idx < len(unit_large):
+        section = n % 10000
+        if section != 0:
+            parts.append(_section_to_chinese(section) + unit_large[idx])
+        else:
+            if parts and not parts[-1].endswith(_CAPITAL_NUMS[0]):
+                parts.append(_CAPITAL_NUMS[0])
+        n //= 10000
+        idx += 1
+    s = "".join(reversed(parts))
+    while "零零" in s:
+        s = s.replace("零零", "零")
+    return s
+
+
+def _rmb_upper_case(amount: Decimal) -> str:
+    amount = _money2(amount)
+    if amount < 0:
+        return "（负数）" + _rmb_upper_case(-amount)
+    if amount == 0:
+        return "人民币零元整"
+    integer = int(amount)
+    frac = _money2(amount - Decimal(integer))
+    jiao_fen = int((frac * 100).quantize(Decimal("1")))
+    jiao, fen = jiao_fen // 10, jiao_fen % 10
+    head = _integer_part_to_chinese(integer)
+    if jiao == 0 and fen == 0:
+        return f"人民币{head}元整"
+    tail = ""
+    if jiao != 0:
+        tail += _CAPITAL_NUMS[jiao] + "角"
+    if fen != 0:
+        tail += _CAPITAL_NUMS[fen] + "分"
+    if jiao == 0 and fen != 0:
+        tail = _CAPITAL_NUMS[0] + tail
+    return f"人民币{head}元" + tail
+
+
+def _normalize_ratio_cell(raw: object) -> Optional[Decimal]:
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return None
+    if isinstance(raw, str) and not raw.strip():
+        return None
+    try:
+        d = Decimal(str(raw).strip().rstrip("%"))
+    except Exception:
+        return None
+    if d > 1:
+        d = d / Decimal("100")
+    if d < 0 or d > 1:
+        return None
+    return d.quantize(Decimal("0.0001"))
+
+
+def _parse_money_cell(raw: object, default: Decimal = Decimal("0")) -> Decimal:
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return _money2(default)
+    s = str(raw).strip().replace(",", "")
+    if not s:
+        return _money2(default)
+    try:
+        return _money2(Decimal(s))
+    except Exception:
+        return _money2(default)
+
+
+def _pick_contract_for_month(
+    db: Session, channel_id: int, game_id: int, settlement_month: str
+) -> Optional[ChannelGameContract]:
+    ref = dt.datetime.strptime(f"{settlement_month}-01", "%Y-%m-%d").date()
+    rows = db.scalars(
+        select(ChannelGameContract)
+        .where(
+            ChannelGameContract.channel_id == channel_id,
+            ChannelGameContract.game_id == game_id,
+            ChannelGameContract.status == "active",
+            ChannelGameContract.effective_start_date <= ref,
+        )
+        .order_by(ChannelGameContract.effective_start_date.desc(), ChannelGameContract.id.desc())
+    ).all()
+    for r in rows:
+        if r.effective_end_date is None or r.effective_end_date >= ref:
+            return r
+    return None
+
+
+def _recalc_settlement_detail_row(
+    db: Session,
+    row: SettlementDetailRow,
+    channel_id: int,
+    game_id: Optional[int],
+):
+    """participation = gross - test - coupon; settlement = participation * (1 - channel_fee) * revenue_share"""
+    g = _money2(row.gross_revenue)
+    t = _money2(row.test_fee or 0)
+    c = _money2(row.coupon_fee or 0)
+    row.gross_revenue = g
+    row.test_fee = t
+    row.coupon_fee = c
+    row.participation_amount = _money2(g - t - c)
+    rsh = row.revenue_share_ratio
+    cf = row.channel_fee_ratio
+    if game_id:
+        if rsh is None or cf is None:
+            contract = _pick_contract_for_month(db, channel_id, game_id, row.settlement_month)
+            if contract:
+                if rsh is None:
+                    rsh = contract.revenue_share_ratio
+                if cf is None:
+                    cf = contract.channel_fee_ratio
+    row.revenue_share_ratio = rsh
+    row.channel_fee_ratio = cf
+    errs: list[str] = []
+    if not game_id:
+        errs.append("游戏未匹配")
+    if rsh is None:
+        errs.append("缺少分成比例（行内与合同均未配置）")
+    if cf is None:
+        errs.append("缺少渠道费比例（行内与合同均未配置）")
+    if row.participation_amount < 0:
+        errs.append("参与分成金额为负")
+    if errs:
+        row.settlement_amount = Decimal("0")
+        if row.row_status != "pending_confirm":
+            row.row_status = "error"
+        if not row.error_message:
+            row.error_message = "；".join(errs)
+        return
+    one_minus_cf = _money2(Decimal("1") - cf)
+    row.settlement_amount = _money2(row.participation_amount * one_minus_cf * rsh)
+    if row.row_status == "error" and errs == []:
+        row.row_status = "normal"
+    if row.row_status not in ("pending_confirm", "used_in_statement"):
+        row.row_status = "normal"
+        row.error_message = ""
+
+
+def _resolve_game_for_import(db: Session, game_name: str, game_code_hint: Optional[str]) -> tuple[Optional[int], str]:
+    name = (game_name or "").strip()
+    code = (game_code_hint or "").strip() or None
+    if code:
+        g = db.scalar(select(Game).where(Game.game_code == code))
+        if g:
+            return g.id, g.name
+    if name:
+        g2 = db.scalar(select(Game).where(Game.name == name))
+        if g2:
+            return g2.id, g2.name
+    return None, name
+
+
+def _df_column_aliases() -> dict[str, list[str]]:
+    return {
+        "settlement_month": ["settlement_month", "账期", "结算月份", "settlement month"],
+        "channel_name": ["channel_name", "渠道名称", "渠道"],
+        "game_name": ["game_name", "游戏名称", "游戏"],
+        "game_code": ["game_code", "游戏编码", "游戏code"],
+        "gross_revenue": ["gross_revenue", "流水", "总收入", "充值流水", "gross"],
+        "test_fee": ["test_fee", "测试费", "测试充值"],
+        "coupon_fee": ["coupon_fee", "代金券", "优惠券", "券抵扣"],
+        "revenue_share_ratio": ["revenue_share_ratio", "分成比例", "流水分成比例"],
+        "channel_fee_ratio": ["channel_fee_ratio", "渠道费比例", "渠道费"],
+        "remark": ["remark", "备注"],
+    }
+
+
+def _normalize_import_df(df: pd.DataFrame) -> pd.DataFrame:
+    aliases = _df_column_aliases()
+    col_map: dict[str, str] = {}
+    lower_map = {str(c).strip().lower(): str(c).strip() for c in df.columns}
+    for canonical, names in aliases.items():
+        for n in names:
+            k = n.strip().lower()
+            if k in lower_map:
+                col_map[lower_map[k]] = canonical
+                break
+    return df.rename(columns=col_map)
+
+
+def _next_monthly_statement_no(db: Session, settlement_month: str) -> str:
+    prefix = "MS" + settlement_month.replace("-", "")
+    like_pat = f"{prefix}-%"
+    n = int(db.scalar(select(func.count(ChannelMonthlySettlementStatement.id)).where(ChannelMonthlySettlementStatement.statement_no.like(like_pat))) or 0)
+    return f"{prefix}-{n + 1:04d}"
+
+
+@app.get("/settlement-imports/template")
+def settlement_import_template(
+    _: dict = Depends(require_role(MONTHLY_SETTLEMENT_READ_ROLES)),
+):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "导入模板"
+    headers = [
+        "settlement_month",
+        "channel_name",
+        "game_name",
+        "gross_revenue",
+        "test_fee",
+        "coupon_fee",
+        "revenue_share_ratio",
+        "channel_fee_ratio",
+        "remark",
+    ]
+    zh = ["账期(YYYY-MM)", "渠道名称", "游戏名称", "流水(必填)", "测试费", "代金券", "分成比例(0~1或%)", "渠道费比例(0~1或%)", "备注"]
+    for i, h in enumerate(headers, 1):
+        ws.cell(row=1, column=i, value=h)
+        ws.cell(row=2, column=i, value=zh[i - 1])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="settlement_import_template.xlsx"'},
+    )
+
+
+@app.post("/settlement-imports/upload")
+async def settlement_import_upload(
+    settlement_month: str = Query(..., description="账期 YYYY-MM"),
+    channel_id: int = Query(..., description="渠道 id，与文件内渠道名称一致"),
+    batch_name: str = Query("", description="批次名称，可空"),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role(MONTHLY_SETTLEMENT_WRITE_ROLES)),
+):
+    ch = db.get(Channel, channel_id)
+    if not ch:
+        raise HTTPException(status_code=400, detail="渠道不存在")
+    month = _normalize_period_yyyymm(settlement_month)
+    raw_name = file.filename or "upload"
+    lower = raw_name.lower()
+    try:
+        content = await file.read()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"读取文件失败: {e}") from e
+    if lower.endswith(".csv"):
+        df = pd.read_csv(io.BytesIO(content))
+        import_type = "csv"
+    elif lower.endswith((".xlsx", ".xls")):
+        df = pd.read_excel(io.BytesIO(content))
+        import_type = "excel"
+    else:
+        raise HTTPException(status_code=400, detail="仅支持 .xlsx/.xls/.csv")
+    df = _normalize_import_df(df)
+    required = {"channel_name", "game_name", "gross_revenue"}
+    missing = required - set(df.columns)
+    if missing:
+        raise HTTPException(status_code=400, detail=f"缺少列: {', '.join(sorted(missing))}")
+    batch = SettlementImportBatch(
+        batch_name=(batch_name or "").strip() or raw_name,
+        source_file_name=raw_name[:500],
+        settlement_month=month,
+        channel_id=channel_id,
+        import_type=import_type,
+        total_rows=len(df),
+        success_rows=0,
+        failed_rows=0,
+        import_status="processing",
+        created_by=ctx["user"],
+    )
+    db.add(batch)
+    db.flush()
+
+    err_lines: list[str] = []
+    for idx, r in df.iterrows():
+        row_no = int(idx) + 1 if isinstance(idx, int) else idx + 1
+        file_ch = str(r.get("channel_name", "")).strip()
+        if file_ch != ch.name:
+            detail = SettlementDetailRow(
+                batch_id=batch.id,
+                settlement_month=month,
+                channel_id=channel_id,
+                game_id=None,
+                raw_game_name=str(r.get("game_name", "")),
+                game_name_snapshot="",
+                gross_revenue=Decimal("0"),
+                row_status="error",
+                error_message=f"渠道名称与所选不一致（第{row_no}行）",
+            )
+            db.add(detail)
+            batch.failed_rows += 1
+            err_lines.append(f"行{row_no}: 渠道名称不匹配")
+            continue
+        sm = r.get("settlement_month")
+        row_month = _normalize_period_yyyymm(str(sm).strip()) if sm is not None and str(sm).strip() else month
+        if row_month != month:
+            detail = SettlementDetailRow(
+                batch_id=batch.id,
+                settlement_month=month,
+                channel_id=channel_id,
+                game_id=None,
+                raw_game_name=str(r.get("game_name", "")),
+                game_name_snapshot="",
+                gross_revenue=Decimal("0"),
+                row_status="error",
+                error_message=f"账期与上传所选不一致（第{row_no}行）",
+            )
+            db.add(detail)
+            batch.failed_rows += 1
+            err_lines.append(f"行{row_no}: 账期不匹配")
+            continue
+        game_hint_code = r.get("game_code") if "game_code" in df.columns else None
+        gid, snap_name = _resolve_game_for_import(db, str(r.get("game_name", "")), None if game_hint_code is None else str(game_hint_code))
+        gross = _parse_money_cell(r.get("gross_revenue"))
+        test_f = _parse_money_cell(r.get("test_fee") if "test_fee" in df.columns else None, Decimal("0"))
+        coupon_f = _parse_money_cell(r.get("coupon_fee") if "coupon_fee" in df.columns else None, Decimal("0"))
+        rsh = _normalize_ratio_cell(r.get("revenue_share_ratio") if "revenue_share_ratio" in df.columns else None)
+        cfr = _normalize_ratio_cell(r.get("channel_fee_ratio") if "channel_fee_ratio" in df.columns else None)
+        remark = str(r.get("remark") if "remark" in df.columns else "").strip()
+        detail = SettlementDetailRow(
+            batch_id=batch.id,
+            settlement_month=month,
+            channel_id=channel_id,
+            game_id=gid,
+            raw_game_name=str(r.get("game_name", "")),
+            game_name_snapshot=snap_name or str(r.get("game_name", "")),
+            gross_revenue=gross,
+            test_fee=test_f,
+            coupon_fee=coupon_f,
+            revenue_share_ratio=rsh,
+            channel_fee_ratio=cfr,
+            remark=remark[:500],
+        )
+        if not gid:
+            detail.row_status = "error"
+            detail.error_message = "游戏名称在系统中不存在"
+            batch.failed_rows += 1
+            err_lines.append(f"行{row_no}: 游戏未匹配")
+        db.add(detail)
+        db.flush()
+        if gid:
+            _recalc_settlement_detail_row(db, detail, channel_id, gid)
+            if detail.row_status == "error":
+                batch.failed_rows += 1
+                err_lines.append(f"行{row_no}: {detail.error_message}")
+            else:
+                batch.success_rows += 1
+        batch.total_rows = len(df)
+
+    batch.import_status = "completed" if batch.failed_rows == 0 else ("partial" if batch.success_rows else "failed")
+    batch.error_summary = "\n".join(err_lines[:30])[:2000]
+    batch.updated_at = dt.datetime.now()
+    write_system_audit(
+        db,
+        ctx["user"],
+        "settlement_import_upload",
+        "import_batch",
+        str(batch.id),
+        f"导入结算明细 {month} / {ch.name} 成功{batch.success_rows} 失败{batch.failed_rows}",
+    )
+    db.commit()
+    return {
+        "batch_id": batch.id,
+        "total_rows": batch.total_rows,
+        "success_rows": batch.success_rows,
+        "failed_rows": batch.failed_rows,
+        "import_status": batch.import_status,
+        "error_summary": batch.error_summary,
+    }
+
+
+@app.get("/settlement-imports")
+def list_settlement_imports(
+    settlement_month: Optional[str] = None,
+    channel_id: Optional[int] = None,
+    page: int = 1,
+    page_size: int = 20,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role(MONTHLY_SETTLEMENT_READ_ROLES)),
+):
+    stmt = select(SettlementImportBatch).order_by(SettlementImportBatch.id.desc())
+    if settlement_month:
+        stmt = stmt.where(SettlementImportBatch.settlement_month == _normalize_period_yyyymm(settlement_month))
+    if channel_id:
+        stmt = stmt.where(SettlementImportBatch.channel_id == channel_id)
+    rows = db.scalars(stmt).all()
+    total = len(rows)
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), 200)
+    slice_rows = rows[(page - 1) * page_size : page * page_size]
+    _b_cids = [x.channel_id for x in slice_rows]
+    ch_names = (
+        {c.id: c.name for c in db.scalars(select(Channel).where(Channel.id.in_(_b_cids))).all()} if _b_cids else {}
+    )
+    return {
+        "items": [
+            {
+                "id": x.id,
+                "batch_name": x.batch_name,
+                "source_file_name": x.source_file_name,
+                "settlement_month": x.settlement_month,
+                "channel_id": x.channel_id,
+                "channel_name": ch_names.get(x.channel_id, ""),
+                "import_type": x.import_type,
+                "total_rows": x.total_rows,
+                "success_rows": x.success_rows,
+                "failed_rows": x.failed_rows,
+                "import_status": x.import_status,
+                "error_summary": x.error_summary,
+                "created_by": x.created_by,
+                "created_at": x.created_at,
+            }
+            for x in slice_rows
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@app.get("/settlement-details")
+def list_settlement_details(
+    batch_id: Optional[int] = None,
+    settlement_month: Optional[str] = None,
+    channel_id: Optional[int] = None,
+    row_status: Optional[str] = None,
+    keyword: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role(MONTHLY_SETTLEMENT_READ_ROLES)),
+):
+    stmt = select(SettlementDetailRow).order_by(SettlementDetailRow.id.desc())
+    if batch_id:
+        stmt = stmt.where(SettlementDetailRow.batch_id == batch_id)
+    if settlement_month:
+        stmt = stmt.where(SettlementDetailRow.settlement_month == _normalize_period_yyyymm(settlement_month))
+    if channel_id:
+        stmt = stmt.where(SettlementDetailRow.channel_id == channel_id)
+    if row_status:
+        stmt = stmt.where(SettlementDetailRow.row_status == row_status)
+    rows = db.scalars(stmt).all()
+    if keyword:
+        kw = keyword.strip().lower()
+        rows = [x for x in rows if kw in (x.raw_game_name or "").lower() or kw in (x.game_name_snapshot or "").lower() or kw in (x.remark or "").lower()]
+    stats = {
+        "total": len(rows),
+        "normal": sum(1 for x in rows if x.row_status == "normal"),
+        "error": sum(1 for x in rows if x.row_status == "error"),
+        "pending_confirm": sum(1 for x in rows if x.row_status == "pending_confirm"),
+        "used_in_statement": sum(1 for x in rows if x.row_status == "used_in_statement"),
+    }
+    total = len(rows)
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), 200)
+    slice_rows = rows[(page - 1) * page_size : page * page_size]
+    gids = [x.game_id for x in slice_rows if x.game_id]
+    games = (
+        {g.id: g.name for g in db.scalars(select(Game).where(Game.id.in_(gids))).all()} if gids else {}
+    )
+    cids = [x.channel_id for x in slice_rows]
+    chs = (
+        {c.id: c.name for c in db.scalars(select(Channel).where(Channel.id.in_(cids))).all()} if cids else {}
+    )
+    return {
+        "stats": stats,
+        "items": [
+            {
+                "id": x.id,
+                "batch_id": x.batch_id,
+                "settlement_month": x.settlement_month,
+                "channel_id": x.channel_id,
+                "channel_name": chs.get(x.channel_id, ""),
+                "game_id": x.game_id,
+                "game_name": games.get(x.game_id, "") if x.game_id else "",
+                "raw_game_name": x.raw_game_name,
+                "game_name_snapshot": x.game_name_snapshot,
+                "gross_revenue": x.gross_revenue,
+                "test_fee": x.test_fee,
+                "coupon_fee": x.coupon_fee,
+                "participation_amount": x.participation_amount,
+                "revenue_share_ratio": x.revenue_share_ratio,
+                "channel_fee_ratio": x.channel_fee_ratio,
+                "settlement_amount": x.settlement_amount,
+                "row_status": x.row_status,
+                "error_message": x.error_message,
+                "remark": x.remark,
+                "monthly_statement_id": x.monthly_statement_id,
+                "created_at": x.created_at,
+                "updated_at": x.updated_at,
+            }
+            for x in slice_rows
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@app.patch("/settlement-details/{detail_id}")
+def patch_settlement_detail(
+    detail_id: int,
+    payload: SettlementDetailPatchIn,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role(MONTHLY_SETTLEMENT_WRITE_ROLES)),
+):
+    row = db.get(SettlementDetailRow, detail_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="明细不存在")
+    if row.row_status == "used_in_statement":
+        raise HTTPException(status_code=400, detail="已用于生成账单的明细不可编辑")
+    if payload.game_id is not None:
+        g = db.get(Game, payload.game_id)
+        if not g:
+            raise HTTPException(status_code=400, detail="游戏不存在")
+        row.game_id = payload.game_id
+        row.game_name_snapshot = g.name
+    if payload.test_fee is not None:
+        row.test_fee = _money2(payload.test_fee)
+    if payload.coupon_fee is not None:
+        row.coupon_fee = _money2(payload.coupon_fee)
+    if payload.revenue_share_ratio is not None:
+        row.revenue_share_ratio = payload.revenue_share_ratio
+    if payload.channel_fee_ratio is not None:
+        row.channel_fee_ratio = payload.channel_fee_ratio
+    if payload.remark is not None:
+        row.remark = (payload.remark or "").strip()[:500]
+    if payload.row_status is not None:
+        row.row_status = payload.row_status
+    _recalc_settlement_detail_row(db, row, row.channel_id, row.game_id)
+    row.updated_at = dt.datetime.now()
+    write_system_audit(
+        db,
+        ctx["user"],
+        "settlement_detail_patch",
+        "settlement_detail",
+        str(row.id),
+        "修改结算明细",
+    )
+    db.commit()
+    return {"id": row.id, "row_status": row.row_status, "settlement_amount": row.settlement_amount}
+
+
+@app.post("/monthly-settlement-statements/generate")
+def monthly_settlement_generate(
+    payload: MonthlySettlementGenerateIn,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role(MONTHLY_SETTLEMENT_WRITE_ROLES)),
+):
+    month = _normalize_period_yyyymm(payload.settlement_month)
+    ch = db.get(Channel, payload.channel_id)
+    if not ch:
+        raise HTTPException(status_code=400, detail="渠道不存在")
+    existing = db.scalar(
+        select(ChannelMonthlySettlementStatement).where(
+            ChannelMonthlySettlementStatement.settlement_month == month,
+            ChannelMonthlySettlementStatement.channel_id == payload.channel_id,
+        )
+    )
+    if existing and not payload.overwrite:
+        raise HTTPException(status_code=400, detail="该账期与渠道已存在账单，若需覆盖请传 overwrite=true")
+    details = db.scalars(
+        select(SettlementDetailRow).where(
+            SettlementDetailRow.settlement_month == month,
+            SettlementDetailRow.channel_id == payload.channel_id,
+            SettlementDetailRow.monthly_statement_id.is_(None),
+            SettlementDetailRow.row_status.in_(["normal", "pending_confirm"]),
+            SettlementDetailRow.game_id.isnot(None),
+        )
+    ).all()
+    if not details:
+        raise HTTPException(status_code=400, detail="没有可用于生成的明细（需状态为正常/待确认且未绑定账单）")
+    by_game: dict[int, list[SettlementDetailRow]] = {}
+    for d in details:
+        by_game.setdefault(d.game_id or 0, []).append(d)
+    ratio_map: dict[int, tuple[Decimal, Decimal]] = {}
+    for gid, drows in by_game.items():
+        keys = {(x.revenue_share_ratio, x.channel_fee_ratio) for x in drows}
+        if len(keys) > 1:
+            raise HTTPException(
+                status_code=400,
+                detail=f"游戏 ID {gid} 在同一账期与渠道下存在不一致的分成/渠道费比例，请先修正明细",
+            )
+        r0 = drows[0]
+        if r0.revenue_share_ratio is None or r0.channel_fee_ratio is None:
+            raise HTTPException(status_code=400, detail=f"游戏 ID {gid} 比例不完整，无法生成账单")
+        ratio_map[gid] = (r0.revenue_share_ratio, r0.channel_fee_ratio)
+
+    if existing and payload.overwrite:
+        old_id = existing.id
+        linked = db.scalars(select(SettlementDetailRow).where(SettlementDetailRow.monthly_statement_id == old_id)).all()
+        for dr in linked:
+            dr.monthly_statement_id = None
+            if dr.row_status == "used_in_statement":
+                dr.row_status = "normal"
+        db.execute(delete(ChannelMonthlySettlementItem).where(ChannelMonthlySettlementItem.statement_id == old_id))
+        db.delete(existing)
+        db.flush()
+
+    contract_sample = None
+    for gid in ratio_map:
+        contract_sample = _pick_contract_for_month(db, payload.channel_id, gid, month)
+        if contract_sample:
+            break
+
+    agg: dict[int, dict] = {}
+    for d in details:
+        gid = d.game_id or 0
+        if gid not in agg:
+            g = db.get(Game, gid)
+            agg[gid] = {
+                "game_name": g.name if g else d.game_name_snapshot,
+                "gross_revenue": Decimal("0"),
+                "test_fee": Decimal("0"),
+                "coupon_fee": Decimal("0"),
+                "participation_amount": Decimal("0"),
+                "settlement_amount": Decimal("0"),
+                "revenue_share_ratio": d.revenue_share_ratio or Decimal("0"),
+                "channel_fee_ratio": d.channel_fee_ratio or Decimal("0"),
+                "remark": "",
+            }
+        a = agg[gid]
+        a["gross_revenue"] = _money2(a["gross_revenue"] + d.gross_revenue)
+        a["test_fee"] = _money2(a["test_fee"] + d.test_fee)
+        a["coupon_fee"] = _money2(a["coupon_fee"] + d.coupon_fee)
+        a["participation_amount"] = _money2(a["participation_amount"] + d.participation_amount)
+        a["settlement_amount"] = _money2(a["settlement_amount"] + d.settlement_amount)
+
+    total_gross = _money2(sum((x["gross_revenue"] for x in agg.values()), start=Decimal("0")))
+    total_test = _money2(sum((x["test_fee"] for x in agg.values()), start=Decimal("0")))
+    total_coupon = _money2(sum((x["coupon_fee"] for x in agg.values()), start=Decimal("0")))
+    total_part = _money2(sum((x["participation_amount"] for x in agg.values()), start=Decimal("0")))
+    total_settle = _money2(sum((x["settlement_amount"] for x in agg.values()), start=Decimal("0")))
+
+    st_no = _next_monthly_statement_no(db, month)
+    c0 = contract_sample
+    statement_title = f"{ch.name} 渠道月度结算对账单 {month}"
+    if c0 and (c0.statement_title_template or "").strip():
+        tmpl = (c0.statement_title_template or "").strip()
+        try:
+            statement_title = tmpl.format(channel_name=ch.name, settlement_month=month, month=month)
+        except Exception:
+            statement_title = tmpl.replace("{channel_name}", ch.name).replace("{settlement_month}", month)
+
+    stmt = ChannelMonthlySettlementStatement(
+        statement_no=st_no,
+        settlement_month=month,
+        channel_id=payload.channel_id,
+        statement_title=statement_title,
+        our_company_name=(c0.our_company_name if c0 else "") or "广州熊动科技有限公司",
+        opposite_company_name=(c0.opposite_company_name if c0 else "") or ch.name,
+        total_gross_revenue=total_gross,
+        total_test_fee=total_test,
+        total_coupon_fee=total_coupon,
+        total_participation_amount=total_part,
+        total_settlement_amount=total_settle,
+        total_settlement_amount_cn=_rmb_upper_case(total_settle),
+        statement_status="draft",
+        remark="",
+        our_company_address=(c0.our_company_address if c0 else "") or "",
+        our_company_phone=(c0.our_company_phone if c0 else "") or "",
+        our_tax_no=(c0.our_tax_no if c0 else "") or "",
+        our_bank_name=(c0.our_bank_name if c0 else "") or "",
+        our_bank_account=(c0.our_bank_account if c0 else "") or "",
+        opposite_tax_no=(c0.opposite_tax_no if c0 else "") or "",
+        opposite_bank_name=(c0.opposite_bank_name if c0 else "") or "",
+        opposite_bank_account=(c0.opposite_bank_account if c0 else "") or "",
+        created_by=ctx["user"],
+    )
+    db.add(stmt)
+    db.flush()
+
+    sort_no = 0
+    for _gid, a in sorted(agg.items(), key=lambda kv: kv[1]["game_name"]):
+        sort_no += 1
+        db.add(
+            ChannelMonthlySettlementItem(
+                statement_id=stmt.id,
+                sort_no=sort_no,
+                settlement_month=month,
+                game_name=a["game_name"],
+                gross_revenue=a["gross_revenue"],
+                test_fee=a["test_fee"],
+                coupon_fee=a["coupon_fee"],
+                participation_amount=a["participation_amount"],
+                revenue_share_ratio=a["revenue_share_ratio"],
+                channel_fee_ratio=a["channel_fee_ratio"],
+                settlement_amount=a["settlement_amount"],
+                remark="",
+            )
+        )
+    for d in details:
+        d.monthly_statement_id = stmt.id
+        d.row_status = "used_in_statement"
+        d.updated_at = dt.datetime.now()
+
+    write_system_audit(
+        db,
+        ctx["user"],
+        "monthly_settlement_generate",
+        "monthly_settlement_statement",
+        str(stmt.id),
+        f"生成月度账单 {month} / {ch.name}",
+    )
+    db.commit()
+    return {"id": stmt.id, "statement_no": stmt.statement_no}
+
+
+@app.get("/monthly-settlement-statements")
+def list_monthly_settlement_statements(
+    settlement_month: Optional[str] = None,
+    channel_id: Optional[int] = None,
+    statement_status: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role(MONTHLY_SETTLEMENT_READ_ROLES)),
+):
+    stmt = select(ChannelMonthlySettlementStatement).order_by(ChannelMonthlySettlementStatement.id.desc())
+    if settlement_month:
+        stmt = stmt.where(ChannelMonthlySettlementStatement.settlement_month == _normalize_period_yyyymm(settlement_month))
+    if channel_id:
+        stmt = stmt.where(ChannelMonthlySettlementStatement.channel_id == channel_id)
+    if statement_status:
+        stmt = stmt.where(ChannelMonthlySettlementStatement.statement_status == statement_status)
+    rows = db.scalars(stmt).all()
+    total = len(rows)
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), 200)
+    slice_rows = rows[(page - 1) * page_size : page * page_size]
+    _mcids = [x.channel_id for x in slice_rows]
+    chs = (
+        {c.id: c.name for c in db.scalars(select(Channel).where(Channel.id.in_(_mcids))).all()} if _mcids else {}
+    )
+    return {
+        "items": [
+            {
+                "id": x.id,
+                "statement_no": x.statement_no,
+                "settlement_month": x.settlement_month,
+                "channel_id": x.channel_id,
+                "channel_name": chs.get(x.channel_id, ""),
+                "statement_title": x.statement_title,
+                "total_gross_revenue": x.total_gross_revenue,
+                "total_test_fee": x.total_test_fee,
+                "total_coupon_fee": x.total_coupon_fee,
+                "total_participation_amount": x.total_participation_amount,
+                "total_settlement_amount": x.total_settlement_amount,
+                "total_settlement_amount_cn": x.total_settlement_amount_cn,
+                "statement_status": x.statement_status,
+                "confirmed_at": x.confirmed_at,
+                "exported_at": x.exported_at,
+                "paid_at": x.paid_at,
+                "created_by": x.created_by,
+                "created_at": x.created_at,
+                "updated_at": x.updated_at,
+            }
+            for x in slice_rows
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@app.get("/monthly-settlement-statements/{statement_id}")
+def get_monthly_settlement_statement(
+    statement_id: int,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role(MONTHLY_SETTLEMENT_READ_ROLES)),
+):
+    statement = db.get(ChannelMonthlySettlementStatement, statement_id)
+    if not statement:
+        raise HTTPException(status_code=404, detail="账单不存在")
+    channel = db.get(Channel, statement.channel_id)
+    items = db.scalars(
+        select(ChannelMonthlySettlementItem)
+        .where(ChannelMonthlySettlementItem.statement_id == statement_id)
+        .order_by(ChannelMonthlySettlementItem.sort_no.asc(), ChannelMonthlySettlementItem.id.asc())
+    ).all()
+    return {
+        "id": statement.id,
+        "statement_no": statement.statement_no,
+        "settlement_month": statement.settlement_month,
+        "channel_id": statement.channel_id,
+        "channel_name": channel.name if channel else "",
+        "statement_title": statement.statement_title,
+        "our_company_name": statement.our_company_name,
+        "our_company_address": statement.our_company_address,
+        "our_company_phone": statement.our_company_phone,
+        "our_tax_no": statement.our_tax_no,
+        "our_bank_name": statement.our_bank_name,
+        "our_bank_account": statement.our_bank_account,
+        "opposite_company_name": statement.opposite_company_name,
+        "opposite_tax_no": statement.opposite_tax_no,
+        "opposite_bank_name": statement.opposite_bank_name,
+        "opposite_bank_account": statement.opposite_bank_account,
+        "total_gross_revenue": statement.total_gross_revenue,
+        "total_test_fee": statement.total_test_fee,
+        "total_coupon_fee": statement.total_coupon_fee,
+        "total_participation_amount": statement.total_participation_amount,
+        "total_settlement_amount": statement.total_settlement_amount,
+        "total_settlement_amount_cn": statement.total_settlement_amount_cn,
+        "statement_status": statement.statement_status,
+        "confirmed_at": statement.confirmed_at,
+        "exported_at": statement.exported_at,
+        "paid_at": statement.paid_at,
+        "remark": statement.remark,
+        "created_by": statement.created_by,
+        "created_at": statement.created_at,
+        "updated_at": statement.updated_at,
+        "items": [
+            {
+                "id": x.id,
+                "sort_no": x.sort_no,
+                "settlement_month": x.settlement_month,
+                "game_name": x.game_name,
+                "gross_revenue": x.gross_revenue,
+                "test_fee": x.test_fee,
+                "coupon_fee": x.coupon_fee,
+                "participation_amount": x.participation_amount,
+                "revenue_share_ratio": x.revenue_share_ratio,
+                "channel_fee_ratio": x.channel_fee_ratio,
+                "settlement_amount": x.settlement_amount,
+                "remark": x.remark,
+            }
+            for x in items
+        ],
+    }
+
+
+@app.patch("/monthly-settlement-statements/{statement_id}/status")
+def patch_monthly_settlement_status(
+    statement_id: int,
+    payload: MonthlySettlementStatusPatchIn,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role(MONTHLY_SETTLEMENT_WRITE_ROLES)),
+):
+    statement = db.get(ChannelMonthlySettlementStatement, statement_id)
+    if not statement:
+        raise HTTPException(status_code=404, detail="账单不存在")
+    now = dt.datetime.now()
+    statement.statement_status = payload.statement_status
+    if payload.statement_status == "confirmed":
+        statement.confirmed_at = now
+    if payload.statement_status == "exported":
+        statement.exported_at = now
+    if payload.statement_status == "paid":
+        statement.paid_at = now
+    statement.updated_at = now
+    write_system_audit(
+        db,
+        ctx["user"],
+        "monthly_settlement_status",
+        "monthly_settlement_statement",
+        str(statement.id),
+        f"状态 → {payload.statement_status}",
+    )
+    db.commit()
+    return {"id": statement.id, "statement_status": statement.statement_status}
+
+
+@app.get("/monthly-settlement-statements/{statement_id}/export-excel")
+def export_monthly_settlement_excel(
+    statement_id: int,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role(MONTHLY_SETTLEMENT_READ_ROLES)),
+):
+    statement = db.get(ChannelMonthlySettlementStatement, statement_id)
+    if not statement:
+        raise HTTPException(status_code=404, detail="账单不存在")
+    channel = db.get(Channel, statement.channel_id)
+    ch_label = channel.name if channel else ""
+    items = db.scalars(
+        select(ChannelMonthlySettlementItem)
+        .where(ChannelMonthlySettlementItem.statement_id == statement_id)
+        .order_by(ChannelMonthlySettlementItem.sort_no.asc(), ChannelMonthlySettlementItem.id.asc())
+    ).all()
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "对账单"
+    row_ix = 1
+    ws.merge_cells(start_row=row_ix, start_column=1, end_row=row_ix, end_column=9)
+    tcell = ws.cell(
+        row=row_ix,
+        column=1,
+        value=statement.statement_title or f"{ch_label} 渠道月度结算对账单 {statement.settlement_month}",
+    )
+    tcell.font = Font(bold=True, size=14)
+    tcell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    row_ix += 1
+    ws.merge_cells(start_row=row_ix, start_column=1, end_row=row_ix, end_column=9)
+    ws.cell(row=row_ix, column=1, value=f"账单编号：{statement.statement_no}    账期：{statement.settlement_month}")
+    row_ix += 2
+    headers = [
+        "序号",
+        "游戏",
+        "流水",
+        "测试费",
+        "代金券",
+        "可参与分成金额",
+        "流水分成比例",
+        "渠道费比例",
+        "结算金额",
+    ]
+    for c, h in enumerate(headers, 1):
+        ws.cell(row=row_ix, column=c, value=h)
+    row_ix += 1
+    for it in items:
+        ws.cell(row=row_ix, column=1, value=it.sort_no)
+        ws.cell(row=row_ix, column=2, value=it.game_name)
+        ws.cell(row=row_ix, column=3, value=float(it.gross_revenue))
+        ws.cell(row=row_ix, column=4, value=float(it.test_fee))
+        ws.cell(row=row_ix, column=5, value=float(it.coupon_fee))
+        ws.cell(row=row_ix, column=6, value=float(it.participation_amount))
+        ws.cell(row=row_ix, column=7, value=float(it.revenue_share_ratio))
+        ws.cell(row=row_ix, column=8, value=float(it.channel_fee_ratio))
+        ws.cell(row=row_ix, column=9, value=float(it.settlement_amount))
+        row_ix += 1
+    row_ix += 1
+    ws.merge_cells(start_row=row_ix, start_column=1, end_row=row_ix, end_column=6)
+    ws.cell(row=row_ix, column=1, value="合计（结算金额）")
+    ws.cell(row=row_ix, column=7, value=float(statement.total_settlement_amount))
+    row_ix += 1
+    ws.merge_cells(start_row=row_ix, start_column=1, end_row=row_ix, end_column=9)
+    ws.cell(row=row_ix, column=1, value=f"大写金额：{statement.total_settlement_amount_cn}")
+    row_ix += 2
+    ws.cell(row=row_ix, column=1, value="备注说明：")
+    row_ix += 1
+    ws.merge_cells(start_row=row_ix, start_column=1, end_row=row_ix, end_column=9)
+    ws.cell(row=row_ix, column=1, value=statement.remark or "")
+    row_ix += 2
+    ws.cell(row=row_ix, column=1, value="甲方（我司）")
+    ws.cell(row=row_ix, column=6, value="乙方（渠道）")
+    row_ix += 1
+    ws.cell(row=row_ix, column=1, value=f"名称：{statement.our_company_name}")
+    ws.cell(row=row_ix, column=6, value=f"名称：{statement.opposite_company_name}")
+    row_ix += 1
+    ws.cell(row=row_ix, column=1, value=f"地址：{statement.our_company_address}")
+    ws.cell(row=row_ix, column=6, value=f"税号：{statement.opposite_tax_no}")
+    row_ix += 1
+    ws.cell(row=row_ix, column=1, value=f"电话：{statement.our_company_phone}")
+    ws.cell(row=row_ix, column=6, value=f"开户行：{statement.opposite_bank_name}")
+    row_ix += 1
+    ws.cell(row=row_ix, column=1, value=f"税号：{statement.our_tax_no}")
+    ws.cell(row=row_ix, column=6, value=f"账号：{statement.opposite_bank_account}")
+    row_ix += 1
+    ws.cell(row=row_ix, column=1, value=f"开户行/账号：{statement.our_bank_name} {statement.our_bank_account}")
+    row_ix += 3
+    ws.merge_cells(start_row=row_ix, start_column=1, end_row=row_ix, end_column=4)
+    ws.merge_cells(start_row=row_ix, start_column=6, end_row=row_ix, end_column=9)
+    ws.cell(row=row_ix, column=1, value="甲方盖章：___________    日期：___________")
+    ws.cell(row=row_ix, column=6, value="乙方盖章：___________    日期：___________")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    fname = f"渠道月度结算对账单_{ch_label}_{statement.settlement_month}.xlsx"
+    write_system_audit(
+        db,
+        ctx["user"],
+        "monthly_settlement_export",
+        "monthly_settlement_statement",
+        str(statement.id),
+        "导出 Excel",
+    )
+    db.commit()
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@app.get("/settlement-contracts")
+def list_settlement_contracts(
+    channel_id: Optional[int] = None,
+    game_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_role(MONTHLY_SETTLEMENT_READ_ROLES)),
+):
+    stmt = select(ChannelGameContract).order_by(ChannelGameContract.id.desc())
+    if channel_id:
+        stmt = stmt.where(ChannelGameContract.channel_id == channel_id)
+    if game_id:
+        stmt = stmt.where(ChannelGameContract.game_id == game_id)
+    rows = db.scalars(stmt).all()
+    return rows
+
+
+@app.post("/settlement-contracts")
+def create_settlement_contract(
+    payload: SettlementContractIn,
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_role([Role.admin, Role.finance_manager, Role.finance])),
+):
+    row = ChannelGameContract(
+        channel_id=payload.channel_id,
+        game_id=payload.game_id,
+        effective_start_date=payload.effective_start_date,
+        effective_end_date=payload.effective_end_date,
+        revenue_share_ratio=payload.revenue_share_ratio,
+        channel_fee_ratio=payload.channel_fee_ratio,
+        deduct_test_fee=payload.deduct_test_fee,
+        deduct_coupon_fee=payload.deduct_coupon_fee,
+        our_company_name=payload.our_company_name,
+        our_company_address=payload.our_company_address,
+        our_company_phone=payload.our_company_phone,
+        our_tax_no=payload.our_tax_no,
+        our_bank_name=payload.our_bank_name,
+        our_bank_account=payload.our_bank_account,
+        opposite_company_name=payload.opposite_company_name,
+        opposite_tax_no=payload.opposite_tax_no,
+        opposite_bank_name=payload.opposite_bank_name,
+        opposite_bank_account=payload.opposite_bank_account,
+        statement_title_template=payload.statement_title_template,
+        remark=payload.remark,
+        status=payload.status,
+    )
+    db.add(row)
+    db.flush()
+    write_system_audit(db, ctx["user"], "create_settlement_contract", "settlement_contract", str(row.id), "新增结算合同配置")
+    db.commit()
+    return {"id": row.id}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
   AppstoreOutlined,
@@ -22,12 +22,13 @@ import {
   SettingOutlined,
   ShopOutlined,
 } from "@ant-design/icons";
+import type { MenuProps } from "antd";
 import { Button, Layout, Menu, Space, Typography } from "antd";
 import { getCurrentRole } from "@/lib/rbac";
 
 const { Header, Sider, Content } = Layout;
 
-const menuItems = [
+const allMenuItems: MenuProps["items"] = [
   { key: "/home", icon: <HomeOutlined />, label: "首页看板" },
   { key: "/channels", icon: <ShopOutlined />, label: "渠道管理" },
   { key: "/games", icon: <GiftOutlined />, label: "游戏管理" },
@@ -39,7 +40,17 @@ const menuItems = [
   { key: "/billing", icon: <ReconciliationOutlined />, label: "账单管理" },
   { key: "/billing-rules", icon: <SettingOutlined />, label: "规则配置" },
   { key: "/contracts", icon: <FileProtectOutlined />, label: "合同管理" },
-  { key: "/settlement-statements", icon: <ReconciliationOutlined />, label: "渠道结算对账单" },
+  {
+    key: "grp-monthly-settlement",
+    icon: <FileExcelOutlined />,
+    label: "渠道月度结算对账单",
+    children: [
+      { key: "/settlement-imports", label: "导入管理" },
+      { key: "/settlement-details", label: "结算明细" },
+      { key: "/settlement-statements", label: "月度账单" },
+    ],
+  },
+  { key: "/channel-settlement-statements", icon: <ReconciliationOutlined />, label: "渠道结算对账单" },
   { key: "/exceptions", icon: <AlertOutlined />, label: "异常中心" },
   { key: "/invoices", icon: <FileTextOutlined />, label: "发票管理" },
   { key: "/receipts", icon: <MoneyCollectOutlined />, label: "回款管理" },
@@ -48,22 +59,67 @@ const menuItems = [
   { key: "/audit-logs", icon: <AuditOutlined />, label: "审计日志" },
 ];
 
+function filterMenuByRole(items: MenuProps["items"], role: string): MenuProps["items"] {
+  const out: MenuProps["items"] = [];
+  for (const raw of items || []) {
+    if (!raw) continue;
+    if ("children" in raw && raw.children) {
+      const children = filterMenuByRole(raw.children, role);
+      if (children?.length) {
+        out.push({ ...raw, children });
+      }
+      continue;
+    }
+    const key = "key" in raw ? String(raw.key) : "";
+    if (key === "/user-management" && role !== "admin") continue;
+    if (key === "/channel-settlement-statements" && role === "tech") continue;
+    if (role === "ops_manager" && key === "/import") continue;
+    if (role === "tech" && key === "/billing-rules") continue;
+    out.push(raw);
+  }
+  return out;
+}
+
+function resolveMenuSelectedKey(pathname: string, items: MenuProps["items"]): string {
+  let best = "";
+  for (const raw of items || []) {
+    if (!raw) continue;
+    if ("children" in raw && raw.children) {
+      const sub = resolveMenuSelectedKey(pathname, raw.children);
+      if (sub.length > best.length) best = sub;
+    } else if ("key" in raw) {
+      const k = String(raw.key);
+      if (pathname === k || pathname.startsWith(`${k}/`)) {
+        if (k.length > best.length) best = k;
+      }
+    }
+  }
+  return best;
+}
+
 export default function AdminShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const role = getCurrentRole();
-  const visibleMenuItems = useMemo(
-    () =>
-      menuItems.filter((m) => {
-        if (m.key === "/user-management" && role !== "admin") return false;
-        if (m.key === "/settlement-statements" && role === "tech") return false;
-        if (role === "ops_manager" && m.key === "/import") return false;
-        if (role === "tech" && m.key === "/billing-rules") return false;
-        return true;
-      }),
-    [role]
+  const [openKeys, setOpenKeys] = useState<string[]>([]);
+
+  const visibleMenuItems = useMemo(() => filterMenuByRole(allMenuItems, role), [role]);
+
+  const selectedKey = useMemo(
+    () => resolveMenuSelectedKey(pathname, visibleMenuItems) || "/home",
+    [pathname, visibleMenuItems]
   );
-  const current = useMemo(() => visibleMenuItems.find((m) => pathname.startsWith(m.key))?.key || "/home", [pathname, visibleMenuItems]);
+
+  useEffect(() => {
+    if (
+      pathname.startsWith("/settlement-imports") ||
+      pathname.startsWith("/settlement-details") ||
+      pathname.startsWith("/settlement-statements")
+    ) {
+      setOpenKeys(["grp-monthly-settlement"]);
+    }
+  }, [pathname]);
+
   const xUser = typeof window !== "undefined" ? localStorage.getItem("x_user") || "finance_user" : "finance_user";
 
   return (
@@ -75,7 +131,14 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
             公司对账后台
           </Space>
         </div>
-        <Menu mode="inline" selectedKeys={[current]} items={visibleMenuItems} onClick={(e) => router.push(e.key)} />
+        <Menu
+          mode="inline"
+          selectedKeys={[selectedKey]}
+          openKeys={openKeys}
+          onOpenChange={(keys) => setOpenKeys(keys as string[])}
+          items={visibleMenuItems}
+          onClick={(e) => router.push(e.key)}
+        />
       </Sider>
       <Layout>
         <Header
