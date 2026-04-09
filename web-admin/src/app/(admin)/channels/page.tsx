@@ -6,7 +6,7 @@ import { Button, Card, Form, Input, Modal, Space, Table, Tag, message } from "an
 import { apiRequest } from "@/lib/api";
 import { buildExportFilename, exportRowsToXlsx } from "@/lib/export";
 
-type Row = { id: number; name: string };
+type Row = { id: number; name: string; channel_code?: string | null };
 type BulkPreviewRow = { key: string; name: string; status: "可新增" | "已存在" | "重复输入" };
 
 export default function ChannelsPage() {
@@ -62,7 +62,7 @@ export default function ChannelsPage() {
   const filtered = useMemo(() => rows.filter((x) => x.name.includes(keyword)), [rows, keyword]);
   const exportCurrent = () => {
     exportRowsToXlsx(
-      filtered.map((x) => ({ 渠道ID: x.id, 渠道名称: x.name })),
+      filtered.map((x) => ({ 渠道ID: x.channel_code ?? "", 渠道名称: x.name })),
       buildExportFilename("channels", "xlsx")
     );
     message.success("导出成功");
@@ -143,6 +143,7 @@ export default function ChannelsPage() {
         pagination={{ pageSize: 10 }}
         columns={[
           { title: "ID", dataIndex: "id", width: 100 },
+          { title: "渠道ID", dataIndex: "channel_code", width: 120 },
           { title: "渠道名称", dataIndex: "name" },
           {
             title: "操作",

@@ -35,6 +35,7 @@ from sqlalchemy import (
     delete,
     func,
     inspect,
+    or_,
     select,
     text,
 )
@@ -176,6 +177,7 @@ class Channel(Base):
     __tablename__ = "channels"
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    channel_code: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, unique=True, index=True)
     active: Mapped[bool] = mapped_column(default=True)
 
 
@@ -1486,6 +1488,73 @@ def ensure_game_code_column():
         pass
 
 
+def ensure_channel_code_column():
+    try:
+        inspector = inspect(engine)
+        if "channels" not in inspector.get_table_names():
+            return
+        cols = {c["name"] for c in inspector.get_columns("channels")}
+        if "channel_code" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE channels ADD COLUMN channel_code VARCHAR(20)"))
+    except Exception:
+        pass
+
+
+def _channel_code_used_set(db: Session) -> set[str]:
+    used: set[str] = set()
+    for cc in db.scalars(select(Channel.channel_code)).all():
+        if cc and str(cc).strip():
+            used.add(str(cc).strip())
+    return used
+
+
+def _format_channel_code(n: int) -> str:
+    return f"C{n:06d}"
+
+
+def _next_available_channel_code_from_used(used: set[str], start: int = 1) -> tuple[str, int]:
+    n = max(1, start)
+    while _format_channel_code(n) in used:
+        n += 1
+    return _format_channel_code(n), n + 1
+
+
+def backfill_empty_channel_codes(db: Session) -> int:
+    """仅补 channel_code 为空的记录，按 id 升序分配 C000001…，不覆盖已有值。"""
+    used = _channel_code_used_set(db)
+    n = 1
+    updated = 0
+    rows = db.scalars(
+        select(Channel)
+        .where(or_(Channel.channel_code.is_(None), Channel.channel_code == ""))
+        .order_by(Channel.id.asc())
+    ).all()
+    for ch in rows:
+        code, n = _next_available_channel_code_from_used(used, n)
+        ch.channel_code = code
+        used.add(code)
+        updated += 1
+    if updated:
+        db.commit()
+    return updated
+
+
+def allocate_new_channel_code(db: Session) -> str:
+    """新建渠道用：取当前已占用的 C###### 最大序号 +1（无任何规范码时从 000001 起）。"""
+    used = _channel_code_used_set(db)
+    max_n = 0
+    for u in used:
+        m = re.match(r"^C(\d{6})$", u)
+        if m:
+            max_n = max(max_n, int(m.group(1)))
+    code = _format_channel_code(max_n + 1)
+    while code in used:
+        max_n += 1
+        code = _format_channel_code(max_n)
+    return code
+
+
 app = FastAPI(title="内部对账系统", version="1.0.0")
 
 # 浏览器直连后端（如合同 PDF 识别）需跨域；默认 * + 无 credentials，与 Bearer 头兼容。生产可用 CORS_ALLOW_ORIGINS 收紧。
@@ -1511,7 +1580,9 @@ def startup():
     ensure_contract_tables()
     ensure_settlement_statement_v2_columns()
     ensure_game_code_column()
+    ensure_channel_code_column()
     with SessionLocal() as db:
+        backfill_empty_channel_codes(db)
         create_default_data(db)
 
 
@@ -1604,9 +1675,10 @@ def create_channel(payload: ChannelIn, db: Session = Depends(get_db), ctx: dict 
     channel = Channel(name=payload.name)
     db.add(channel)
     db.flush()
+    channel.channel_code = allocate_new_channel_code(db)
     write_system_audit(db, ctx["user"], "create_channel", "channel", str(channel.id), f"新增渠道: {payload.name}")
     db.commit()
-    return {"id": channel.id, "name": channel.name}
+    return {"id": channel.id, "name": channel.name, "channel_code": channel.channel_code}
 
 
 @app.post("/channels/bulk-create")
@@ -1632,7 +1704,10 @@ def bulk_create_channels(
         if name in exists:
             failed_names.append(name)
             continue
-        db.add(Channel(name=name))
+        ch = Channel(name=name)
+        db.add(ch)
+        db.flush()
+        ch.channel_code = allocate_new_channel_code(db)
         success_count += 1
     write_system_audit(
         db,
@@ -1662,7 +1737,7 @@ def update_channel(channel_id: int, payload: ChannelIn, db: Session = Depends(ge
     row.name = payload.name
     write_system_audit(db, _["user"], "update_channel", "channel", str(row.id), f"编辑渠道: {payload.name}")
     db.commit()
-    return {"id": row.id, "name": row.name}
+    return {"id": row.id, "name": row.name, "channel_code": row.channel_code}
 
 
 @app.delete("/channels/{channel_id}")
